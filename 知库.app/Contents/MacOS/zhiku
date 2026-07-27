@@ -1,0 +1,37 @@
+#!/bin/bash
+set -Eeuo pipefail
+
+# 此启动器依赖同级项目源码，因此知库.app 必须保留在项目根目录。
+PROJ="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
+if [ ! -f "$PROJ/backend/desktop.py" ] || [ ! -f "$PROJ/requirements.txt" ]; then
+  /usr/bin/osascript -e 'display alert "知库启动失败" message "请将知库.app 放回包含 backend 和 requirements.txt 的项目根目录后重试"' || true
+  exit 1
+fi
+cd "$PROJ"
+
+LOG_DIR="$HOME/Library/Logs"
+LOG="$LOG_DIR/zhiku.log"
+mkdir -p "$LOG_DIR"
+printf '=== %s launch arch=%s ===\n' "$(date)" "$(uname -m)" >> "$LOG"
+
+export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
+ARCH_PREFIX=()
+if [ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" = "1" ] && [ "$(uname -m)" != "arm64" ]; then
+  ARCH_PREFIX=(/usr/bin/arch -arm64)
+fi
+
+if [ ! -x .venv/bin/python ]; then
+  PYTHON_BIN="$(command -v python3 || true)"
+  if [ -z "$PYTHON_BIN" ]; then
+    /usr/bin/osascript -e 'display alert "知库启动失败" message "未找到 Python 3，请先安装 Python 3.9 或更高版本"' || true
+    exit 1
+  fi
+  /usr/bin/osascript -e 'display notification "首次启动，正在安装依赖，可能需要几分钟…" with title "知库"' || true
+  if ! "${ARCH_PREFIX[@]}" "$PYTHON_BIN" -m venv .venv >> "$LOG" 2>&1 || \
+     ! "${ARCH_PREFIX[@]}" .venv/bin/python -m pip install --disable-pip-version-check -q -r requirements.txt >> "$LOG" 2>&1; then
+    /usr/bin/osascript -e 'display alert "知库启动失败" message "依赖安装失败，请在终端进入项目目录运行 ./run.sh 查看详情"' || true
+    exit 1
+  fi
+fi
+
+exec "${ARCH_PREFIX[@]}" .venv/bin/python -m backend.desktop >> "$LOG" 2>&1

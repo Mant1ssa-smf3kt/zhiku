@@ -1,0 +1,43 @@
+# Local application data (documents, API keys, chats, vector indexes, models)
+data/
+
+# Python environments and caches
+.venv/
+venv/
+__pycache__/
+*.py[cod]
+*.so
+.pytest_cache/
+.ruff_cache/
+.mypy_cache/
+.coverage
+coverage.xml
+htmlcov/
+
+# Packaging artifacts
+build/
+dist/
+*.egg-info/
+
+# Local configuration and credentials
+.env
+.env.*
+!.env.example
+*.pem
+*.key
+*.p12
+*.pfx
+
+# Databases, logs, and temporary files
+*.sqlite
+*.sqlite-*
+*.db
+*.log
+*.tmp
+*.swp
+
+# Editors and operating systems
+.DS_Store
+.idea/
+.vscode/
+.claude/settings.local.json
