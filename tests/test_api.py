@@ -31,15 +31,13 @@ class ApiTests(unittest.TestCase):
         response = self.client.get("/api/settings")
 
         self.assertEqual(response.status_code, 200)
-        self.assertEqual(
-            response.json(),
-            {
-                "default_embed_provider_id": "",
-                "default_embed_model": "",
-                "default_chat_provider_id": "",
-                "default_chat_model": "",
-            },
-        )
+        body = response.json()
+        self.assertEqual(body["default_embed_provider_id"], "")
+        self.assertEqual(body["default_embed_model"], "")
+        self.assertEqual(body["default_chat_provider_id"], "")
+        self.assertEqual(body["default_chat_model"], "")
+        self.assertEqual(body["graph_enabled"], "1")
+        self.assertEqual(body["graph_llm_extract"], "0")
 
     def test_provider_response_never_returns_api_key(self):
         response = self.client.post(

@@ -53,7 +53,9 @@ CREATE TABLE IF NOT EXISTS documents(
   total_chunks INTEGER NOT NULL DEFAULT 0,
   processed_chunks INTEGER NOT NULL DEFAULT 0,
   file_path TEXT NOT NULL DEFAULT '',
-  created_at INTEGER NOT NULL
+  created_at INTEGER NOT NULL,
+  graph_status TEXT NOT NULL DEFAULT 'none',
+  graph_error TEXT NOT NULL DEFAULT ''
 );
 CREATE TABLE IF NOT EXISTS chunks(
   id INTEGER PRIMARY KEY AUTOINCREMENT,
@@ -82,16 +84,100 @@ CREATE TABLE IF NOT EXISTS messages(
   sources TEXT NOT NULL DEFAULT '[]',
   created_at INTEGER NOT NULL
 );
+CREATE TABLE IF NOT EXISTS graph_jobs(
+  id TEXT PRIMARY KEY,
+  subject_id TEXT NOT NULL,
+  document_id TEXT NOT NULL,
+  status TEXT NOT NULL DEFAULT 'pending',
+  attempt INTEGER NOT NULL DEFAULT 0,
+  max_attempt INTEGER NOT NULL DEFAULT 3,
+  error TEXT NOT NULL DEFAULT '',
+  checkpoint TEXT NOT NULL DEFAULT '',
+  created_at INTEGER NOT NULL,
+  updated_at INTEGER NOT NULL,
+  started_at INTEGER,
+  finished_at INTEGER
+);
+CREATE INDEX IF NOT EXISTS idx_graph_jobs_doc ON graph_jobs(document_id);
+CREATE INDEX IF NOT EXISTS idx_graph_jobs_status ON graph_jobs(status);
+CREATE TABLE IF NOT EXISTS entities(
+  id TEXT PRIMARY KEY,
+  subject_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  norm_name TEXT NOT NULL,
+  type TEXT NOT NULL DEFAULT 'Term',
+  created_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_entities_subject_norm_type
+  ON entities(subject_id, norm_name, type);
+CREATE INDEX IF NOT EXISTS idx_entities_subject ON entities(subject_id);
+CREATE TABLE IF NOT EXISTS entity_mentions(
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  entity_id TEXT NOT NULL,
+  chunk_id INTEGER NOT NULL,
+  document_id TEXT NOT NULL,
+  subject_id TEXT NOT NULL,
+  score REAL NOT NULL DEFAULT 1.0,
+  extractor TEXT NOT NULL DEFAULT 'rule'
+);
+CREATE INDEX IF NOT EXISTS idx_mentions_entity ON entity_mentions(entity_id);
+CREATE INDEX IF NOT EXISTS idx_mentions_doc ON entity_mentions(document_id);
+CREATE INDEX IF NOT EXISTS idx_mentions_chunk ON entity_mentions(chunk_id);
+CREATE TABLE IF NOT EXISTS relations(
+  id TEXT PRIMARY KEY,
+  subject_id TEXT NOT NULL,
+  src_entity_id TEXT NOT NULL,
+  dst_entity_id TEXT NOT NULL,
+  rel_type TEXT NOT NULL DEFAULT 'CO_OCCURS',
+  weight REAL NOT NULL DEFAULT 1.0,
+  evidence_json TEXT NOT NULL DEFAULT '[]',
+  created_at INTEGER NOT NULL
+);
+CREATE UNIQUE INDEX IF NOT EXISTS idx_relations_unique
+  ON relations(subject_id, src_entity_id, dst_entity_id, rel_type);
+CREATE INDEX IF NOT EXISTS idx_relations_subject ON relations(subject_id);
+CREATE TABLE IF NOT EXISTS topics(
+  id TEXT PRIMARY KEY,
+  subject_id TEXT NOT NULL,
+  name TEXT NOT NULL,
+  locked INTEGER NOT NULL DEFAULT 0,
+  created_at INTEGER NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_topics_subject ON topics(subject_id);
+CREATE TABLE IF NOT EXISTS doc_topics(
+  document_id TEXT NOT NULL,
+  topic_id TEXT NOT NULL,
+  score REAL NOT NULL DEFAULT 0,
+  PRIMARY KEY (document_id, topic_id)
+);
+CREATE TABLE IF NOT EXISTS graph_meta(
+  subject_id TEXT PRIMARY KEY,
+  version INTEGER NOT NULL DEFAULT 0,
+  status TEXT NOT NULL DEFAULT 'idle',
+  entity_count INTEGER NOT NULL DEFAULT 0,
+  relation_count INTEGER NOT NULL DEFAULT 0,
+  topic_count INTEGER NOT NULL DEFAULT 0,
+  updated_at INTEGER NOT NULL
+);
 """
 
 
 def _migrate(conn):
-    """旧库升级：providers 表补充每服务商的模型配置列。"""
-    cols = {r[1] for r in conn.execute("PRAGMA table_info(providers)").fetchall()}
-    if "chat_model" not in cols:
+    """旧库升级：providers 模型列 + 文档图状态列。"""
+    pcols = {r[1] for r in conn.execute("PRAGMA table_info(providers)").fetchall()}
+    if "chat_model" not in pcols:
         conn.execute("ALTER TABLE providers ADD COLUMN chat_model TEXT NOT NULL DEFAULT ''")
-    if "embed_model" not in cols:
+    if "embed_model" not in pcols:
         conn.execute("ALTER TABLE providers ADD COLUMN embed_model TEXT NOT NULL DEFAULT ''")
+    dcols = {r[1] for r in conn.execute("PRAGMA table_info(documents)").fetchall()}
+    if "graph_status" not in dcols:
+        conn.execute(
+            "ALTER TABLE documents ADD COLUMN graph_status TEXT NOT NULL DEFAULT 'none'"
+        )
+    if "graph_error" not in dcols:
+        conn.execute(
+            "ALTER TABLE documents ADD COLUMN graph_error TEXT NOT NULL DEFAULT ''"
+        )
     conn.commit()
 
 

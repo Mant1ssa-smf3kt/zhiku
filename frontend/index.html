@@ -3,26 +3,65 @@
 <head>
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>知库 · 个人学习知识库</title>
-  <link rel="icon" href="data:image/svg+xml,<svg xmlns=%22http://www.w3.org/2000/svg%22 viewBox=%220 0 100 100%22><text y=%22.9em%22 font-size=%2290%22>📚</text></svg>">
+  <title>知库</title>
+  <link rel="icon" href="data:image/svg+xml,<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 64 64'><rect width='64' height='64' fill='%23131810'/><text x='50%25' y='54%25' text-anchor='middle' font-size='30' font-family='Songti SC, STSong, serif' fill='%23efece1'>知</text></svg>">
   <link rel="stylesheet" href="style.css">
+  <style>
+    #bootSplash {
+      position: fixed; inset: 0; z-index: 9999;
+      display: flex; align-items: center; justify-content: center;
+      background: #efece1;
+      color: #131810;
+      transition: opacity .28s ease, visibility .28s ease;
+    }
+    @media (prefers-color-scheme: dark) {
+      #bootSplash { background: #131410; color: #efece1; }
+    }
+    #bootSplash.hide { opacity: 0; visibility: hidden; pointer-events: none; }
+    #bootSplash .boot-core { text-align: center; }
+    #bootSplash .boot-mark {
+      font-family: "Songti SC", "STSong", "Noto Serif SC", "Source Han Serif SC", serif;
+      font-size: 56px; font-weight: 600; line-height: 1; letter-spacing: 0;
+    }
+    #bootSplash .boot-rule {
+      width: 28px; height: 1px; margin: 16px auto 12px;
+      background: #b42318;
+    }
+    #bootSplash .boot-sub {
+      font-size: 12px; letter-spacing: .18em;
+      color: #6a6758; font-weight: 500;
+    }
+    @media (prefers-color-scheme: dark) {
+      #bootSplash .boot-sub { color: #9a9788; }
+    }
+    @media (prefers-reduced-motion: reduce) {
+      #bootSplash { transition: none; }
+    }
+  </style>
 </head>
 <body>
+  <div id="bootSplash" aria-live="polite">
+    <div class="boot-core">
+      <div class="boot-mark">知</div>
+      <div class="boot-rule" aria-hidden="true"></div>
+      <div class="boot-sub" id="bootSplashText">启动</div>
+    </div>
+  </div>
   <div id="app">
     <aside id="sidebar">
       <div class="brand">
-        <span class="brand-logo">📚</span>
+        <span class="brand-logo">知</span>
         <div>
           <div class="brand-name">知库</div>
-          <div class="brand-sub">个人学习知识库</div>
+          <div class="brand-sub">本机</div>
         </div>
       </div>
-      <div class="sidebar-label">我的科目</div>
+      <div class="sidebar-label">科目</div>
       <nav id="subjectList" class="subject-list"></nav>
-      <button id="addSubjectBtn" class="btn btn-ghost add-subject-btn">＋ 新建科目</button>
+      <button id="addSubjectBtn" class="btn btn-ghost add-subject-btn">＋ 科目</button>
       <div class="sidebar-footer">
-        <button id="homeBtn" class="side-btn">🏠 首页概览</button>
-        <button id="settingsBtn" class="side-btn">⚙️ 全局设置</button>
+        <button id="homeBtn" class="side-btn">书桌</button>
+        <button id="settingsBtn" class="side-btn">设置</button>
       </div>
     </aside>
     <main id="main"></main>

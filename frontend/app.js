@@ -37,6 +37,63 @@ function toast(msg, type) {
   setTimeout(() => el.remove(), 4000);
 }
 
+function setBootText(t) {
+  const el = $('#bootSplashText');
+  if (el) el.textContent = t || '';
+}
+
+function hideBootSplash() {
+  const el = $('#bootSplash');
+  if (!el || el.classList.contains('hide')) return;
+  el.classList.add('hide');
+  setTimeout(() => { try { el.remove(); } catch (e) { /* ignore */ } }, 320);
+}
+
+/** 按需加载 vis-network：不阻塞首屏；失败可重试 */
+let _visLoadPromise = null;
+function ensureVisNetwork() {
+  if (typeof vis !== 'undefined' && vis.Network) return Promise.resolve(vis);
+  if (_visLoadPromise) return _visLoadPromise;
+  _visLoadPromise = new Promise((resolve, reject) => {
+    const urls = [
+      'https://unpkg.com/vis-network@9.1.9/standalone/umd/vis-network.min.js',
+      'https://cdn.jsdelivr.net/npm/vis-network@9.1.9/standalone/umd/vis-network.min.js',
+    ];
+    let i = 0;
+    const tryNext = () => {
+      if (typeof vis !== 'undefined' && vis.Network) {
+        resolve(vis);
+        return;
+      }
+      if (i >= urls.length) {
+        _visLoadPromise = null;
+        reject(new Error('图谱库加载失败（请检查网络后点刷新）'));
+        return;
+      }
+      const url = urls[i++];
+      const s = document.createElement('script');
+      s.src = url;
+      s.async = true;
+      s.onload = () => {
+        if (typeof vis !== 'undefined' && vis.Network) resolve(vis);
+        else tryNext();
+      };
+      s.onerror = () => tryNext();
+      document.head.appendChild(s);
+    };
+    tryNext();
+  });
+  return _visLoadPromise;
+}
+
+function progressBarHtml(pct, label) {
+  const p = Math.max(0, Math.min(100, Number(pct) || 0));
+  return '<div class="gprog">' +
+    '<div class="gprog-track"><div class="gprog-fill" style="width:' + p.toFixed(1) + '%"></div></div>' +
+    (label != null ? '<div class="gprog-label">' + esc(String(label)) + '</div>' : '') +
+    '</div>';
+}
+
 async function api(path, opts) {
   opts = opts || {};
   const init = { method: opts.method || 'GET' };
@@ -172,8 +229,8 @@ function confirmModal(opts) {
 /* ================= 全局状态 ================= */
 
 const LOCAL_EMBED_MODEL = 'BAAI/bge-small-zh-v1.5';
-const EMOJIS = ['📚', '📖', '✏️', '🧪', '🧮', '🌍', '💻', '🎨', '🎵', '🏛️', '🧠', '⚖️', '💊', '🗣️', '📐', '⚽'];
-const COLORS = ['#4F5BD5', '#D5484F', '#E8871E', '#2F9E63', '#0E9BB5', '#8A5CD6', '#D6558E', '#5B7083'];
+const EMOJIS = ['Aa', 'Nb', 'En', 'Hs', 'Cs', 'Py', 'Js', 'Ai', 'Ml', 'Db', 'Net', 'Law', 'Med', 'Art', 'Math', 'Geo'];
+const COLORS = ['#131810', '#3d3a30', '#6a4a32', '#8a3a28', '#2c5a38', '#2a3f5c', '#5a3a52', '#7a5a20'];
 
 const state = {
   providers: [],
@@ -183,13 +240,28 @@ const state = {
   convs: [],
   convId: null,
   useRag: true,
+  useGraph: true,
+  topicFilter: '',
+  graphLimit: 300,
   sending: false,
   modelCache: {},              // provider_id -> [model,...]
+  graphNet: null,
+  _graphRo: null,
+  _graphPollTimer: null,
 };
 let docsPollTimer = null;
 
 function subjectById(sid) { return state.subjects.find(s => s.id === sid); }
 function providerById(pid) { return state.providers.find(p => p.id === pid); }
+
+/** 科目标记：优先用用户设置的短标签，否则取名称首字 */
+function subjectMark(s) {
+  const icon = (s && s.icon || '').trim();
+  // 仅接受短字母/数字/汉字标签；旧数据里的 emoji 会回退到科目首字
+  if (icon && /^[A-Za-z0-9一-鿿]{1,3}$/.test(icon)) return icon;
+  const name = (s && s.name || '').trim();
+  return name ? name.slice(0, 1) : '知';
+}
 
 async function loadCore() {
   const [providers, settings, subjects] = await Promise.all([
@@ -209,6 +281,15 @@ async function refreshSubjects() {
 
 function nav(view) {
   if (docsPollTimer) { clearInterval(docsPollTimer); docsPollTimer = null; }
+  if (state._graphPollTimer) { clearInterval(state._graphPollTimer); state._graphPollTimer = null; }
+  if (state.graphNet) {
+    try { state.graphNet.destroy(); } catch (e) { /* ignore */ }
+    state.graphNet = null;
+  }
+  if (state._graphRo) {
+    try { state._graphRo.disconnect(); } catch (e) { /* ignore */ }
+    state._graphRo = null;
+  }
   state.view = view;
   renderSidebar();
   renderMain();
@@ -218,11 +299,12 @@ function renderSidebar() {
   const list = $('#subjectList');
   list.innerHTML = state.subjects.map(s => {
     const active = state.view.type === 'subject' && state.view.sid === s.id;
+    const mark = subjectMark(s);
     return '<button class="subject-item' + (active ? ' active' : '') + '" data-sid="' + s.id + '">' +
-      '<span class="subject-icon" style="background:' + esc(s.color) + '22">' + esc(s.icon) + '</span>' +
+      '<span class="subject-icon" style="background:' + esc(s.color || '#131810') + '">' + esc(mark) + '</span>' +
       '<span class="s-name">' + esc(s.name) + '</span>' +
       '<span class="s-count">' + s.doc_count + '</span></button>';
-  }).join('') || '<div style="padding:10px;color:var(--muted);font-size:12.5px">还没有科目，点下方按钮创建</div>';
+  }).join('') || '<div style="padding:10px;color:var(--muted);font-size:12.5px">还没有科目</div>';
   $$('.subject-item', list).forEach(el => {
     el.onclick = () => openSubject(el.dataset.sid);
   });
@@ -249,52 +331,72 @@ function renderMain() {
 
 function renderHome() {
   const totalDocs = state.subjects.reduce((a, s) => a + s.doc_count, 0);
-  const totalChunks = state.subjects.reduce((a, s) => a + s.chunk_count, 0);
   const st = state.settings;
+  const setupDone = state.providers.length > 0 &&
+    !!(st.default_embed_model && st.default_chat_model) &&
+    state.subjects.length > 0 && totalDocs > 0;
   const steps = [
     {
       done: state.providers.length > 0,
-      title: '添加 API 服务商',
-      desc: '填入任意 OpenAI 兼容服务的 Base URL 和 API Key（OpenAI / DeepSeek / SiliconFlow / 智谱 / Ollama 等）',
-      btn: '去添加', act: () => nav({ type: 'settings' }),
+      title: '接入模型服务',
+      desc: '任意 OpenAI 兼容接口：DeepSeek、SiliconFlow、智谱、Ollama 均可',
+      btn: '设置', act: () => nav({ type: 'settings' }),
     },
     {
       done: !!(st.default_embed_model && st.default_chat_model),
-      title: '选择默认模型',
-      desc: '设置默认的向量化（Embedding）模型和对话模型，各科目也可以单独覆盖',
-      btn: '去设置', act: () => nav({ type: 'settings' }),
+      title: '指定默认模型',
+      desc: '向量模型负责入库，对话模型负责回答。科目里还能单独改',
+      btn: '设置', act: () => nav({ type: 'settings' }),
     },
     {
       done: state.subjects.length > 0,
-      title: '创建科目',
-      desc: '比如「语文」「高数」「专业课」，每个科目有独立的资料库和对话记录',
-      btn: '新建科目', act: newSubjectModal,
+      title: '建一个科目',
+      desc: '语文、高数、专业课——各自一套资料和对话',
+      btn: '新建', act: newSubjectModal,
     },
     {
       done: totalDocs > 0,
-      title: '上传资料，开始学习',
-      desc: '把 PPT、PDF、Word、笔记拖进科目资料库，然后就可以针对资料提问了',
+      title: '放进资料',
+      desc: 'PDF、PPT、Word、笔记拖进去，解析完就能问',
       btn: null,
     },
   ];
-  $('#main').innerHTML = '<div class="page">' +
-    '<div class="page-title">👋 欢迎回来</div>' +
-    '<div class="page-desc">知库 — 把你的学习资料变成可以对话的知识库</div>' +
-    '<div class="stat-row">' +
-    '<div class="stat-tile"><div class="num">' + state.subjects.length + '</div><div class="lbl">科目</div></div>' +
-    '<div class="stat-tile"><div class="num">' + totalDocs + '</div><div class="lbl">学习资料</div></div>' +
-    '<div class="stat-tile"><div class="num">' + totalChunks + '</div><div class="lbl">知识片段</div></div>' +
-    '</div>' +
-    '<div class="card"><h3>使用步骤</h3><div class="step-list">' +
+
+  const desk = state.subjects.length
+    ? '<div class="desk-list">' +
+      state.subjects.map(s =>
+        '<button class="desk-item" data-desk="' + s.id + '">' +
+        '<span class="desk-mark" style="background:' + esc(s.color || '#131810') + '">' + esc(subjectMark(s)) + '</span>' +
+        '<span class="desk-body"><span class="desk-name">' + esc(s.name) + '</span>' +
+        '<span class="desk-meta">' + s.doc_count + ' 份资料 · ' + s.chunk_count + ' 段</span></span>' +
+        '<span class="desk-go">打开</span></button>'
+      ).join('') +
+      '</div>'
+    : '<div class="empty-state">还没有科目。左边「＋ 科目」，或下面直接建一个。</div>';
+
+  const setupHtml = setupDone ? '' :
+    '<div class="card"><h3>还差几步</h3><div class="step-list">' +
     steps.map((s, i) =>
       '<div class="step-item' + (s.done ? ' done' : '') + '">' +
-      '<div class="step-num">' + (s.done ? '✓' : i + 1) + '</div>' +
+      '<div class="step-num">' + (s.done ? '—' : String(i + 1).padStart(2, '0')) + '</div>' +
       '<div class="step-body"><div class="step-title">' + s.title + '</div>' +
       '<div class="step-desc">' + s.desc + '</div></div>' +
       (s.btn && !s.done ? '<button class="btn btn-sm" data-step="' + i + '">' + s.btn + '</button>' : '') +
       '</div>'
     ).join('') +
-    '</div></div></div>';
+    '</div></div>';
+
+  $('#main').innerHTML = '<div class="page page-home">' +
+    '<div class="mast">' +
+    '<div class="mast-kicker">本机 · 不联网也能翻资料</div>' +
+    '<div class="page-title">知库</div>' +
+    '<div class="page-desc">按科目收资料，问的时候带回原文出处。数据只落在这台机器上。</div>' +
+    '</div>' +
+    desk + setupHtml + '</div>';
+
+  $$('[data-desk]').forEach(el => {
+    el.onclick = () => openSubject(el.dataset.desk);
+  });
   steps.forEach((s, i) => {
     const btn = $('[data-step="' + i + '"]');
     if (btn) btn.onclick = s.act;
@@ -319,7 +421,7 @@ function modelPickerHtml(prefix, providerId, model, allowDefault, allowLocal) {
   if (isLocal && !model) model = LOCAL_EMBED_MODEL;
   const provOpts =
     (allowDefault ? '<option value="">跟随全局默认</option>' : '<option value="">请选择服务商</option>') +
-    (allowLocal ? '<option value="local"' + (isLocal ? ' selected' : '') + '>🖥️ 内置本地模型</option>' : '') +
+    (allowLocal ? '<option value="local"' + (isLocal ? ' selected' : '') + '>内置本地模型</option>' : '') +
     state.providers.map(p =>
       '<option value="' + esc(p.id) + '"' + (p.id === providerId ? ' selected' : '') + '>' +
       esc(p.name) + '</option>').join('');
@@ -402,24 +504,33 @@ function bindModelPicker(prefix, testType) {
 function renderSettings() {
   const st = state.settings;
   $('#main').innerHTML = '<div class="page">' +
-    '<div class="page-title">⚙️ 全局设置</div>' +
-    '<div class="page-desc">管理 API 服务商与默认模型，所有配置仅保存在本机</div>' +
+    '<div class="mast"><div class="mast-kicker">本机配置</div>' +
+    '<div class="page-title">设置</div>' +
+    '<div class="page-desc">服务商和默认模型。密钥只写进本机数据库，不上传。</div></div>' +
     '<div class="card"><h3>API 服务商</h3>' +
-    '<div class="card-hint">任何 OpenAI 兼容接口均可：OpenAI、DeepSeek、SiliconFlow、智谱、月之暗面、本地 Ollama 等。' +
-    '每个服务商可配置自己的对话模型和向量模型，点「启用」一键切换当前使用哪一家</div>' +
+    '<div class="card-hint">支持任意 OpenAI 兼容接口。配置对话与向量模型后，点「启用」切换当前服务。</div>' +
     '<div id="providerList"></div>' +
-    '<button class="btn btn-ghost" id="addProviderBtn" style="width:100%;justify-content:center">＋ 添加服务商</button>' +
+    '<button class="btn btn-ghost" id="addProviderBtn" style="width:100%;justify-content:center">添加服务商</button>' +
     '</div>' +
-    '<div class="card"><h3>当前使用的模型（高级）</h3>' +
-    '<div class="card-hint">通常不用动这里——点上方服务商卡片的「启用」即可整套切换。' +
-    '需要混合搭配时（如对话用 A 家、向量用 B 家）才在这里单独调整；各科目还可在「科目设置」中覆盖</div>' +
-    '<div class="form-row"><label>向量化模型（Embedding，用于资料入库和检索）</label>' +
+    '<div class="card"><h3>默认模型</h3>' +
+    '<div class="card-hint">通常通过服务商卡片「启用」即可。需要混合搭配（对话与向量不同服务）时再单独调整。</div>' +
+    '<div class="form-row"><label>向量模型</label>' +
     modelPickerHtml('defEmbed', st.default_embed_provider_id, st.default_embed_model, false, true) +
-    '<div class="hint">可选「🖥️ 内置本地模型」免 API 离线运行；在线模型如 text-embedding-3-small、BAAI/bge-m3 等</div></div>' +
-    '<div class="form-row"><label>对话模型（用于学习问答）</label>' +
+    '<div class="hint">可选内置本地模型离线运行；或 text-embedding-3-small、BAAI/bge-m3 等</div></div>' +
+    '<div class="form-row"><label>对话模型</label>' +
     modelPickerHtml('defChat', st.default_chat_provider_id, st.default_chat_model, false) +
-    '<div class="hint">如 gpt-4o-mini、deepseek-chat、glm-4-flash 等</div></div>' +
-    '<button class="btn btn-primary" id="saveSettingsBtn">保存调整</button>' +
+    '<div class="hint">如 gpt-4o-mini、deepseek-chat、glm-4-flash</div></div>' +
+    '<button class="btn btn-primary" id="saveSettingsBtn">保存</button>' +
+    '</div>' +
+    '<div class="card"><h3>知识图谱</h3>' +
+    '<div class="card-hint">资料入库后自动抽取术语并构建共现图；失败不挡问答。</div>' +
+    '<div class="form-row"><label class="check-row"><input type="checkbox" id="graphEnabled"' +
+    ((st.graph_enabled === '0') ? '' : ' checked') +
+    '> 启用图谱增强检索</label></div>' +
+    '<div class="form-row"><label class="check-row"><input type="checkbox" id="graphLlmExtract"' +
+    (st.graph_llm_extract === '1' ? ' checked' : '') +
+    '> LLM 增强抽图（默认关）</label></div>' +
+    '<button class="btn btn-primary" id="saveGraphSettingsBtn">保存图谱设置</button>' +
     '</div></div>';
 
   renderProviderList();
@@ -438,6 +549,18 @@ function renderSettings() {
         },
       });
       toast('默认模型已保存');
+    } catch (e) { toast(e.message, 'err'); }
+  };
+  $('#saveGraphSettingsBtn').onclick = async () => {
+    try {
+      state.settings = await api('/settings', {
+        method: 'PUT',
+        body: {
+          graph_enabled: $('#graphEnabled').checked ? '1' : '0',
+          graph_llm_extract: $('#graphLlmExtract').checked ? '1' : '0',
+        },
+      });
+      toast('图谱设置已保存');
     } catch (e) { toast(e.message, 'err'); }
   };
 }
@@ -461,16 +584,16 @@ function renderProviderList() {
     const modelLine =
       '<div class="provider-models">' +
       (p.chat_model
-        ? '<span class="model-chip' + (act.chatActive ? ' on' : '') + '">💬 ' + esc(p.chat_model) + '</span>'
-        : '<span class="model-chip empty">💬 未配置对话模型</span>') +
+        ? '<span class="model-chip' + (act.chatActive ? ' on' : '') + '">' + esc(p.chat_model) + '</span>'
+        : '<span class="model-chip empty">未配置对话模型</span>') +
       (p.embed_model
-        ? '<span class="model-chip' + (act.embedActive ? ' on' : '') + '">🧬 ' + esc(p.embed_model) + '</span>'
-        : '<span class="model-chip empty">🧬 未配置向量模型</span>') +
+        ? '<span class="model-chip' + (act.embedActive ? ' on' : '') + '">' + esc(p.embed_model) + '</span>'
+        : '<span class="model-chip empty">未配置向量模型</span>') +
       '</div>';
     return '<div class="provider-card' + (act.fullActive ? ' active' : '') + '">' +
       '<div class="provider-info">' +
       '<div class="provider-name">' + esc(p.name) +
-      (act.fullActive ? ' <span class="badge ok">✓ 使用中</span>' : '') + '</div>' +
+      (act.fullActive ? ' <span class="badge ok">使用中</span>' : '') + '</div>' +
       '<div class="provider-url">' + esc(p.base_url) + '</div>' +
       modelLine +
       '</div>' +
@@ -488,11 +611,11 @@ function renderProviderList() {
   box.innerHTML +=
     '<div class="provider-card' + (localActive ? ' active' : '') + '">' +
     '<div class="provider-info">' +
-    '<div class="provider-name">🖥️ 本地向量模型（内置）' +
-    (localActive ? ' <span class="badge ok">✓ 使用中</span>' : '') + '</div>' +
+    '<div class="provider-name">本地向量模型' +
+    (localActive ? ' <span class="badge ok">使用中</span>' : '') + '</div>' +
     '<div class="provider-key">免 API Key · 数据不出本机 · 负责资料向量化，对话仍用上面的在线模型</div>' +
     '<div class="provider-models">' +
-    '<span class="model-chip' + (localActive ? ' on' : '') + '">🧬 ' + LOCAL_EMBED_MODEL + '</span>' +
+    '<span class="model-chip' + (localActive ? ' on' : '') + '">' + LOCAL_EMBED_MODEL + '</span>' +
     '<span class="model-chip empty" id="localEmbedStatus">状态检查中…</span></div>' +
     '</div>' +
     '<div class="provider-actions">' +
@@ -584,15 +707,15 @@ function providerModal(p) {
     '<div class="form-row" style="border-top:1px solid var(--border);padding-top:14px">' +
     '<label>模型配置</label>' +
     '<div class="hint" style="margin-bottom:8px">填好地址和密钥后点「获取模型」从列表选择，也可以直接手动输入模型名</div>' +
-    '<div style="margin-bottom:10px"><button class="btn btn-sm" id="pvFetch">🔄 获取模型列表</button>' +
+    '<div style="margin-bottom:10px"><button class="btn btn-sm" id="pvFetch">获取模型列表</button>' +
     '<span class="hint" id="pvFetchStatus" style="margin-left:8px"></span></div>' +
     '<div class="form-inline" style="margin-bottom:8px">' +
-    '<span style="min-width:88px;font-size:13px">💬 对话模型</span>' +
-    '<input class="input" id="pvChatModel" list="pvModelList" placeholder="如 deepseek-chat，用于学习问答" value="' +
+    '<span style="min-width:72px;font-size:13px">对话</span>' +
+    '<input class="input" id="pvChatModel" list="pvModelList" placeholder="如 deepseek-chat" value="' +
     esc(p ? p.chat_model : '') + '"></div>' +
     '<div class="form-inline">' +
-    '<span style="min-width:88px;font-size:13px">🧬 向量模型</span>' +
-    '<input class="input" id="pvEmbedModel" list="pvModelList" placeholder="如 BAAI/bge-m3，用于资料检索" value="' +
+    '<span style="min-width:72px;font-size:13px">向量</span>' +
+    '<input class="input" id="pvEmbedModel" list="pvModelList" placeholder="如 BAAI/bge-m3" value="' +
     esc(p ? p.embed_model : '') + '"></div>' +
     '<datalist id="pvModelList"></datalist></div>' +
     '<div class="modal-actions">' +
@@ -661,27 +784,33 @@ function providerModal(p) {
 /* ================= 科目页 ================= */
 
 const TABS = [
-  ['chat', '💬 学习问答'],
-  ['docs', '📁 资料库'],
-  ['search', '🔍 检索测试'],
-  ['config', '⚙️ 科目设置'],
+  ['chat', '问答'],
+  ['docs', '资料'],
+  ['graph', '图谱'],
+  ['search', '检索'],
+  ['config', '设置'],
 ];
 
 function renderSubject() {
   const s = subjectById(state.view.sid);
   if (!s) { nav({ type: 'home' }); return; }
   const tab = state.view.tab;
-  $('#main').innerHTML = '<div class="page">' +
+  const mark = subjectMark(s);
+  $('#main').innerHTML = '<div class="page' + (tab === 'graph' ? ' page-graph' : '') + '">' +
     '<div class="subj-head">' +
-    '<div class="subj-head-icon" style="background:' + esc(s.color) + '22">' + esc(s.icon) + '</div>' +
+    '<div class="subj-head-icon" style="background:' + esc(s.color || '#131810') + '">' + esc(mark) + '</div>' +
     '<div><h1>' + esc(s.name) + '</h1>' +
-    '<div class="subj-meta">' + s.doc_count + ' 份资料 · ' + s.chunk_count + ' 个知识片段 · ' +
-    s.conv_count + ' 组对话' + (s.description ? ' · ' + esc(s.description) : '') + '</div></div></div>' +
+    '<div class="subj-meta">' + s.doc_count + ' 资料 · ' + s.chunk_count + ' 片段 · ' +
+    s.conv_count + ' 对话' + (s.description ? ' · ' + esc(s.description) : '') + '</div></div></div>' +
     '<div class="tabs">' +
     TABS.map(([k, label]) =>
       '<button class="tab' + (tab === k ? ' active' : '') + '" data-tab="' + k + '">' + label + '</button>'
     ).join('') +
     '</div><div id="tabContent"></div></div>';
+
+  // 切 tab 时主区域始终从顶开始，避免「上面 UI 被顶走」
+  const main = $('#main');
+  if (main) main.scrollTop = 0;
 
   $$('.tab').forEach(el => {
     el.onclick = () => nav({ type: 'subject', sid: s.id, tab: el.dataset.tab });
@@ -689,6 +818,7 @@ function renderSubject() {
 
   if (tab === 'docs') renderDocsTab(s);
   else if (tab === 'chat') renderChatTab(s);
+  else if (tab === 'graph') renderGraphTab(s);
   else if (tab === 'search') renderSearchTab(s);
   else if (tab === 'config') renderConfigTab(s);
 }
@@ -704,14 +834,14 @@ function ftBadge(ft) {
 function renderDocsTab(s) {
   $('#tabContent').innerHTML =
     '<div class="doc-toolbar">' +
-    '<button class="btn btn-primary" id="uploadBtn">⬆️ 上传资料</button>' +
-    '<span class="doc-hint">支持 PDF · PPTX · DOCX · TXT · Markdown，可多选</span>' +
+    '<button class="btn btn-primary" id="uploadBtn">上传资料</button>' +
+    '<span class="doc-hint">PDF · PPTX · DOCX · TXT · Markdown</span>' +
     '<span class="flex-spacer"></span>' +
-    '<button class="btn btn-sm" id="reindexBtn" title="用当前向量模型对全部资料重新向量化">🔄 重建索引</button>' +
+    '<select id="topicFilter" class="topic-filter"><option value="">全部主题</option></select>' +
+    '<button class="btn btn-sm" id="reindexBtn" title="用当前向量模型重新向量化">重建索引</button>' +
     '</div>' +
     '<input type="file" id="fileInput" multiple accept=".pdf,.pptx,.docx,.txt,.md,.markdown" style="display:none">' +
-    '<div class="dropzone" id="dropzone"><div class="dz-icon">📥</div>' +
-    '把文件拖到这里，或点击选择文件</div>' +
+    '<div class="dropzone" id="dropzone">把文件拖到这里，或点此选择。PDF、PPTX、DOCX、TXT、Markdown。</div>' +
     '<div id="docTableWrap"></div>';
 
   const input = $('#fileInput');
@@ -743,7 +873,22 @@ function renderDocsTab(s) {
     } catch (e) { toast(e.message, 'err'); }
   };
 
-  refreshDocs(s.id);
+  loadTopicFilter(s.id).then(() => refreshDocs(s.id));
+}
+
+async function loadTopicFilter(sid) {
+  const sel = $('#topicFilter');
+  if (!sel) return;
+  let topics = [];
+  try { topics = await api('/subjects/' + sid + '/topics'); } catch (e) { topics = []; }
+  const cur = state.topicFilter || '';
+  sel.innerHTML = '<option value="">全部主题</option>' +
+    topics.map(t => '<option value="' + esc(t.id) + '"' + (t.id === cur ? ' selected' : '') + '>' +
+      esc(t.name) + ' (' + t.doc_count + ')</option>').join('');
+  sel.onchange = () => {
+    state.topicFilter = sel.value || '';
+    refreshDocs(sid);
+  };
 }
 
 async function uploadFiles(sid, files) {
@@ -751,7 +896,7 @@ async function uploadFiles(sid, files) {
   if (btn && btn.disabled) return;  // 上传进行中，避免重复提交
   const fd = new FormData();
   for (const f of files) fd.append('files', f, f.name);
-  if (btn) { btn.disabled = true; btn.textContent = '⏳ 上传中…'; }
+  if (btn) { btn.disabled = true; btn.textContent = '上传中…'; }
   const dz = $('#dropzone');
   if (dz) dz.style.pointerEvents = 'none';
   try {
@@ -765,7 +910,7 @@ async function uploadFiles(sid, files) {
   } catch (e) { toast(e.message, 'err'); }
   finally {
     const b = $('#uploadBtn');
-    if (b) { b.disabled = false; b.textContent = '⬆️ 上传资料'; }
+    if (b) { b.disabled = false; b.textContent = '上传资料'; }
     const d = $('#dropzone');
     if (d) d.style.pointerEvents = '';
   }
@@ -774,24 +919,29 @@ async function uploadFiles(sid, files) {
 async function refreshDocs(sid) {
   if (state.view.type !== 'subject' || state.view.sid !== sid || state.view.tab !== 'docs') return;
   let docs;
-  try { docs = await api('/subjects/' + sid + '/documents'); }
-  catch (e) { return; }
+  try {
+    if (state.topicFilter) {
+      docs = await api('/subjects/' + sid + '/topics/' + state.topicFilter + '/documents');
+    } else {
+      docs = await api('/subjects/' + sid + '/documents');
+    }
+  } catch (e) { return; }
   const wrap = $('#docTableWrap');
   if (!wrap) return;
 
   if (!docs.length) {
-    wrap.innerHTML = '<div class="empty-state"><div class="big">🗂️</div>' +
-      '把这门课的课件、讲义、笔记都传上来吧</div>';
+    wrap.innerHTML = '<div class="empty-state">' +
+      (state.topicFilter ? '这个主题下还没有资料。' : '还没有资料。把课件、讲义或笔记拖上来。') + '</div>';
   } else {
     wrap.innerHTML = '<table class="doc-table"><thead><tr>' +
-      '<th style="width:56px">类型</th><th>文件名</th><th>大小</th><th>片段</th><th>状态</th><th>上传时间</th><th style="width:44px"></th>' +
+      '<th style="width:56px">类型</th><th>文件名</th><th>大小</th><th>片段</th><th>状态</th><th>图谱</th><th>上传时间</th><th style="width:44px"></th>' +
       '</tr></thead><tbody>' +
       docs.map(d => {
         let status;
         if (d.status === 'ready') {
-          status = '<span class="badge ok">✓ 已就绪</span>';
+          status = '<span class="badge ok">就绪</span>';
         } else if (d.status === 'error') {
-          status = '<span class="badge err" title="' + esc(d.error) + '">✕ 失败</span> ' +
+          status = '<span class="badge err" title="' + esc(d.error) + '">失败</span> ' +
             '<button class="btn btn-sm" data-retry="' + d.id + '">重试</button>' +
             '<div class="err-text">' + esc(d.error) + '</div>';
         } else {
@@ -800,8 +950,21 @@ async function refreshDocs(sid) {
             (d.total_chunks
               ? '<div class="progress-bar"><div style="width:' + pct + '%"></div></div>' +
                 '<span class="progress-txt">' + pct + '%</span>'
-              : '<span class="progress-txt">解析中…</span>') +
+              : '<span class="progress-txt">解析中</span>') +
             '</div>';
+        }
+        let gstatus;
+        const gs = d.graph_status || 'none';
+        if (gs === 'ready') gstatus = '<span class="badge ok">图就绪</span>';
+        else if (gs === 'error') {
+          gstatus = '<span class="badge err" title="' + esc(d.graph_error || '') + '">图失败</span> ' +
+            '<button class="btn btn-sm" data-gretry="' + d.id + '">重试</button>';
+        } else if (gs === 'pending' || gs === 'building') {
+          gstatus = '<div class="gprog-inline"><span class="badge">建图中</span>' +
+            progressBarHtml(gs === 'pending' ? 2 : 35, gs === 'pending' ? '排队' : '构建') +
+            '</div>';
+        } else {
+          gstatus = '<span class="badge">—</span>';
         }
         return '<tr>' +
           '<td>' + ftBadge(d.filetype) + '</td>' +
@@ -810,8 +973,9 @@ async function refreshDocs(sid) {
           '<td>' + fmtSize(d.size) + '</td>' +
           '<td>' + (d.chunk_count || '-') + '</td>' +
           '<td>' + status + '</td>' +
+          '<td>' + gstatus + '</td>' +
           '<td style="color:var(--muted);font-size:12.5px">' + fmtTime(d.created_at) + '</td>' +
-          '<td><button class="btn btn-sm" style="border:none" data-del="' + d.id + '" title="删除">🗑️</button></td>' +
+          '<td><button class="btn btn-sm btn-ghost" data-del="' + d.id + '" title="删除">删除</button></td>' +
           '</tr>';
       }).join('') + '</tbody></table>';
 
@@ -821,6 +985,16 @@ async function refreshDocs(sid) {
         try {
           await api('/documents/' + btn.dataset.retry + '/retry', { method: 'POST' });
           toast('已重新开始处理');
+          await refreshDocs(sid);
+        } catch (e) { toast(e.message, 'err'); btn.disabled = false; }
+      };
+    });
+    $$('[data-gretry]', wrap).forEach(btn => {
+      btn.onclick = async () => {
+        btn.disabled = true;
+        try {
+          await api('/documents/' + btn.dataset.gretry + '/graph/retry', { method: 'POST' });
+          toast('已重新建图');
           await refreshDocs(sid);
         } catch (e) { toast(e.message, 'err'); btn.disabled = false; }
       };
@@ -844,7 +1018,8 @@ async function refreshDocs(sid) {
     });
   }
 
-  const hasProcessing = docs.some(d => d.status === 'processing');
+  const hasProcessing = docs.some(d => d.status === 'processing' ||
+    d.graph_status === 'pending' || d.graph_status === 'building');
   if (hasProcessing && !docsPollTimer) {
     docsPollTimer = setInterval(() => refreshDocs(sid), 1500);
   } else if (!hasProcessing && docsPollTimer) {
@@ -859,19 +1034,23 @@ async function refreshDocs(sid) {
 async function renderChatTab(s) {
   $('#tabContent').innerHTML = '<div class="chat-layout">' +
     '<div class="conv-panel">' +
-    '<div class="conv-panel-head"><button class="btn" id="newConvBtn">＋ 新对话</button></div>' +
+    '<div class="conv-panel-head"><button class="btn" id="newConvBtn">新对话</button></div>' +
     '<div class="conv-items" id="convItems"></div></div>' +
     '<div class="chat-panel">' +
     '<div class="chat-msgs" id="chatMsgs"></div>' +
     '<div class="composer">' +
     '<div class="composer-opts"><label><input type="checkbox" id="ragToggle"' +
-    (state.useRag ? ' checked' : '') + '> 结合资料库回答（引用来源）</label></div>' +
+    (state.useRag ? ' checked' : '') + '> 结合资料库回答（引用来源）</label> ' +
+    '<label><input type="checkbox" id="graphToggle"' +
+    (state.useGraph ? ' checked' : '') + '> 图谱增强</label></div>' +
     '<div class="composer-box">' +
     '<textarea id="chatInput" rows="1" placeholder="向「' + esc(s.name) + '」资料库提问，Enter 发送，Shift+Enter 换行"></textarea>' +
     '<button class="btn btn-primary send-btn" id="sendBtn"' + (state.sending ? ' disabled' : '') + '>发送</button>' +
     '</div></div></div></div>';
 
   $('#ragToggle').onchange = e => { state.useRag = e.target.checked; };
+  const gt = $('#graphToggle');
+  if (gt) gt.onchange = e => { state.useGraph = e.target.checked; };
   $('#newConvBtn').onclick = () => { state.convId = null; renderConvList(); renderMessages([]); };
 
   const input = $('#chatInput');
@@ -951,7 +1130,7 @@ function sourcesHtml(sources, warning) {
   if (warning) html += '<div class="banner-warn" style="margin:8px 0 0">' + esc(warning) + '</div>';
   if (!sources || !sources.length) return html;
   html += '<div class="sources-block">' +
-    '<button class="sources-toggle">📎 参考来源 (' + sources.length + ') ▾</button>' +
+    '<button class="sources-toggle">出处 ' + sources.length + ' ▾</button>' +
     '<div class="sources-list" style="display:none">' +
     sources.map(src =>
       '<div class="source-card">' +
@@ -985,9 +1164,9 @@ function renderMessages(msgs) {
   const box = $('#chatMsgs');
   if (!box) return;
   if (!msgs.length) {
-    box.innerHTML = '<div class="chat-empty"><div class="big">💬</div>' +
-      '<div>开始提问吧，AI 会结合你上传的资料回答</div>' +
-      '<div style="font-size:12px">例如：帮我总结第三章的重点 / 这个概念是什么意思？</div></div>';
+    box.innerHTML = '<div class="chat-empty">' +
+      '<div>对着这堆资料问。回答会标出处。</div>' +
+      '<div style="font-size:12px;color:var(--muted)">比如：第三章在讲什么；这个概念原文怎么定义</div></div>';
     return;
   }
   box.innerHTML = msgs.map(m => {
@@ -1006,7 +1185,7 @@ async function streamChat(cid, message, useRag, handlers) {
   const res = await fetch('/api/conversations/' + cid + '/chat', {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify({ message, use_rag: useRag }),
+    body: JSON.stringify({ message, use_rag: useRag, use_graph: !!state.useGraph }),
   });
   if (!res.ok || !res.body) {
     let msg = '请求失败 (' + res.status + ')';
@@ -1071,7 +1250,7 @@ async function sendMessage(s) {
       '<div class="msg-row user"><div class="bubble">' + esc(text) + '</div></div>' +
       '<div class="msg-row assistant"><div class="bubble">' +
       '<div class="think-block" style="display:none">' +
-      '<button class="think-toggle">💭 思考中…</button>' +
+      '<button class="think-toggle">思考中…</button>' +
       '<div class="think-body"></div></div>' +
       '<div class="md stream-content"><span class="cursor-blink"></span></div>' +
       '<div class="stream-extra"></div></div></div>');
@@ -1101,7 +1280,7 @@ async function sendMessage(s) {
       if (nearBottom) box.scrollTop = box.scrollHeight;
     };
     const collapseThink = () => {
-      thinkToggle.textContent = '💭 思考过程（点击展开）';
+      thinkToggle.textContent = '思考过程（点击展开）';
       thinkBody.style.display = 'none';
     };
 
@@ -1143,7 +1322,7 @@ async function sendMessage(s) {
     paintThink();
     if (noContent) {
       // 模型只输出了思考过程：保持展开并提示（后端已把思考内容存为本条消息）
-      thinkToggle.textContent = '💭 思考过程';
+      thinkToggle.textContent = '思考过程';
       thinkBody.style.display = 'block';
       contentEl.innerHTML = '<div class="banner-warn" style="margin:0">模型未输出正式回答' +
         '（思考可能被输出上限截断），已保留思考过程，可重新提问或更换模型</div>';
@@ -1154,7 +1333,7 @@ async function sendMessage(s) {
     if (errMsg) {
       // 与后端「保留部分内容」的落库行为一致：不清空已生成的文字，在尾部追加错误提示
       contentEl.insertAdjacentHTML('beforeend',
-        '<div class="banner-warn" style="margin:8px 0 0">⚠️ ' + esc(errMsg) + '</div>');
+        '<div class="banner-warn" style="margin:8px 0 0">' + esc(errMsg) + '</div>');
       if (!acc.trim()) restoreInput();
     }
     if (extraEl) {
@@ -1164,7 +1343,7 @@ async function sendMessage(s) {
   } catch (e) {
     if (contentEl) {
       contentEl.innerHTML = (acc ? md(acc) : '') +
-        '<div class="banner-warn" style="margin:8px 0 0">⚠️ ' + esc(e.message) + '</div>';
+        '<div class="banner-warn" style="margin:8px 0 0">' + esc(e.message) + '</div>';
     } else {
       toast(e.message, 'err');
       restoreInput();
@@ -1190,6 +1369,8 @@ function renderSearchTab(s) {
     '<select class="input" id="searchTopK" style="max-width:110px">' +
     [3, 5, 8, 10].map(k => '<option value="' + k + '"' + (k === 5 ? ' selected' : '') + '>前 ' + k + ' 条</option>').join('') +
     '</select>' +
+    '<label class="check-inline"><input type="checkbox" id="searchUseGraph"' +
+    (state.useGraph ? ' checked' : '') + '> 图谱加成</label>' +
     '<button class="btn btn-primary" id="searchBtn">检索</button>' +
     '</div></div><div id="searchResults"></div>';
 
@@ -1201,14 +1382,16 @@ function renderSearchTab(s) {
     btn.disabled = true; btn.innerHTML = '<span class="spinner"></span>';
     const box = $('#searchResults');
     try {
+      const useG = $('#searchUseGraph') ? $('#searchUseGraph').checked : true;
+      state.useGraph = useG;
       const data = await api('/subjects/' + s.id + '/search', {
         method: 'POST',
-        body: { query: q, top_k: parseInt($('#searchTopK').value, 10) },
+        body: { query: q, top_k: parseInt($('#searchTopK').value, 10), use_graph: useG },
       });
       let html = '';
       if (data.warning) html += '<div class="banner-warn">' + esc(data.warning) + '</div>';
       if (!data.results.length) {
-        html += '<div class="empty-state"><div class="big">🔍</div>没有找到相关片段，试试上传更多资料</div>';
+        html += '<div class="empty-state">没有命中相关片段。</div>';
       } else {
         html += data.results.map((r, i) =>
           '<div class="result-card"><div class="result-head">' +
@@ -1236,6 +1419,738 @@ function renderSearchTab(s) {
   };
 }
 
+/* ---------- 知识图谱 ---------- */
+
+function stopGraphPoll() {
+  if (state._graphPollTimer) {
+    clearInterval(state._graphPollTimer);
+    state._graphPollTimer = null;
+  }
+}
+
+async function refreshGraphBuildPanel(sid) {
+  const panel = $('#graphBuildPanel');
+  const hint = $('#graphMetaHint');
+  if (!panel && !hint) return null;
+  let meta;
+  try {
+    meta = await api('/subjects/' + sid + '/graph');
+  } catch (e) {
+    if (hint) hint.textContent = e.message;
+    return null;
+  }
+  if (hint) {
+    hint.textContent = '状态 ' + meta.status + ' · v' + meta.version +
+      ' · 实体 ' + meta.entity_count + ' · 关系 ' + meta.relation_count +
+      ' · 主题 ' + meta.topic_count +
+      (meta.jobs_pending ? ' · 排队 ' + meta.jobs_pending : '');
+  }
+  if (panel) {
+    const building = (meta.docs_graph_building || 0) + (meta.docs_graph_pending || 0) > 0 ||
+      meta.status === 'building';
+    if (building || (meta.docs_graph_error || 0) > 0) {
+      const pct = meta.progress_pct != null ? meta.progress_pct : 0;
+      const msgParts = [];
+      if (meta.docs_total) {
+        msgParts.push('资料 ' + (meta.docs_graph_ready || 0) + '/' + meta.docs_total + ' 已建图');
+      }
+      if (meta.docs_graph_building) msgParts.push(meta.docs_graph_building + ' 构建中');
+      if (meta.docs_graph_pending) msgParts.push(meta.docs_graph_pending + ' 排队');
+      if (meta.docs_graph_error) msgParts.push(meta.docs_graph_error + ' 失败');
+      const active = (meta.active_jobs || [])[0];
+      if (active && active.message) msgParts.push(active.message);
+      panel.style.display = '';
+      panel.innerHTML =
+        '<div class="graph-build-head"><strong>知识图谱构建中</strong>' +
+        '<span>' + pct.toFixed(0) + '%</span></div>' +
+        progressBarHtml(pct) +
+        '<div class="graph-build-msg">' + esc(msgParts.join(' · ') || '处理中…') + '</div>';
+    } else {
+      panel.style.display = 'none';
+      panel.innerHTML = '';
+    }
+  }
+  return meta;
+}
+
+async function renderGraphTab(s) {
+  // page-graph 已在 renderSubject 挂上；这里只保证滚动归零
+  const main = $('#main');
+  if (main) main.scrollTop = 0;
+  stopGraphPoll();
+
+  const limits = [100, 200, 300, 500, 800, 1000];
+  let curLimit = state.graphLimit || 300;
+  if (limits.indexOf(curLimit) < 0) curLimit = 300;
+
+  $('#tabContent').innerHTML =
+    '<div class="graph-shell">' +
+    '<div class="doc-toolbar">' +
+    '<span class="doc-hint" id="graphMetaHint">加载中…</span>' +
+    '<span class="flex-spacer"></span>' +
+    '<label class="check-inline">节点上限 <select id="graphLimit" class="input" style="width:auto;max-width:100px;padding:4px 8px">' +
+    limits.map(n => '<option value="' + n + '"' + (n === curLimit ? ' selected' : '') + '>' + n + '</option>').join('') +
+    '</select></label>' +
+    '<button class="btn btn-sm" id="graphReloadBtn">刷新</button>' +
+    '<button class="btn btn-sm" id="graphRebuildBtn">重建图谱</button>' +
+    '</div>' +
+    '<div id="graphBuildPanel" class="graph-build-panel" style="display:none"></div>' +
+    '<div class="graph-layout">' +
+    '<div id="graphCanvas" class="graph-canvas"></div>' +
+    '<div id="graphSide" class="graph-side"><div class="empty-state" style="padding:8px 0">' +
+    '点一个节点看原文；再点一次或点空白取消锁定。</div></div>' +
+    '</div>' +
+    '</div>';
+
+  await refreshGraphBuildPanel(s.id);
+
+  const reload = () => paintGraphNetwork(s.id);
+
+  $('#graphRebuildBtn').onclick = async () => {
+    const ok = await confirmModal({
+      title: '重建知识图谱',
+      text: '将对本科目已入库资料重新抽取实体与共现关系。不改动原文与向量索引。',
+      okText: '开始重建',
+    });
+    if (!ok) return;
+    try {
+      const r = await api('/subjects/' + s.id + '/graph/rebuild', { method: 'POST' });
+      toast('已开始重建 ' + r.started + ' 份资料的图谱');
+      await refreshGraphBuildPanel(s.id);
+      startGraphBuildPoll(s.id);
+    } catch (e) { toast(e.message, 'err'); }
+  };
+  $('#graphReloadBtn').onclick = reload;
+  $('#graphLimit').onchange = () => {
+    state.graphLimit = parseInt($('#graphLimit').value, 10) || 300;
+    reload();
+  };
+
+  startGraphBuildPoll(s.id);
+  await paintGraphNetwork(s.id);
+}
+
+function startGraphBuildPoll(sid) {
+  stopGraphPoll();
+  state._graphPollTimer = setInterval(async () => {
+    if (state.view.type !== 'subject' || state.view.sid !== sid || state.view.tab !== 'graph') {
+      stopGraphPoll();
+      return;
+    }
+    const meta = await refreshGraphBuildPanel(sid);
+    if (!meta) return;
+    const busy = (meta.docs_graph_building || 0) + (meta.docs_graph_pending || 0) > 0 ||
+      meta.status === 'building';
+    if (!busy) {
+      stopGraphPoll();
+      // 构建刚结束时自动刷新一次画布
+      if (meta.entity_count > 0 && !state.graphNet) paintGraphNetwork(sid);
+    }
+  }, 1200);
+}
+
+async function paintGraphNetwork(sid) {
+  const canvas = $('#graphCanvas');
+  if (!canvas) return;
+
+  if (state.graphNet) {
+    try { state.graphNet.destroy(); } catch (e) { /* ignore */ }
+    state.graphNet = null;
+  }
+
+  canvas.innerHTML =
+    '<div class="graph-loading">' +
+    '<div class="spinner"></div>' +
+    '<div>准备图谱引擎…</div></div>';
+
+  try {
+    await ensureVisNetwork();
+  } catch (e) {
+    canvas.innerHTML = '<div class="banner-warn">' + esc(e.message) +
+      ' <button class="btn btn-sm" id="visRetryBtn">重试加载</button></div>';
+    const btn = $('#visRetryBtn');
+    if (btn) btn.onclick = () => paintGraphNetwork(sid);
+    return;
+  }
+
+  const limitEl = $('#graphLimit');
+  const limit = limitEl ? parseInt(limitEl.value, 10) || (state.graphLimit || 300) : (state.graphLimit || 300);
+  state.graphLimit = limit;
+
+  canvas.innerHTML =
+    '<div class="graph-loading">' +
+    '<div class="spinner"></div>' +
+    '<div>拉取子图（最多 ' + limit + ' 节点）…</div></div>';
+
+  let data;
+  try {
+    data = await api('/subjects/' + sid + '/graph/view?depth=1&limit=' + limit);
+  } catch (e) {
+    canvas.innerHTML = '<div class="banner-warn">' + esc(e.message) + '</div>';
+    return;
+  }
+  if (!data.nodes || !data.nodes.length) {
+    canvas.innerHTML = '<div class="empty-state">还没有实体。资料入库后会按术语自动抽图。</div>';
+    return;
+  }
+
+  canvas.innerHTML =
+    '<div class="graph-loading">' +
+    '<div class="spinner"></div>' +
+    '<div>布局 ' + data.nodes.length + ' 个节点…</div></div>';
+
+  // 下一帧再挂 canvas，保证 loading 先绘制
+  await new Promise(r => requestAnimationFrame(() => r()));
+
+  canvas.innerHTML = '';
+  // 不再用 JS 改 canvas 外联高度（那会牵动整页布局）
+  // 高度完全由 .graph-layout / flex 决定
+
+  let edgeList = data.edges || [];
+  // 大图时边数随 limit 放宽，但仍设上限保流畅
+  const maxEdges = Math.min(edgeList.length, Math.min(limit * 4, 3000));
+  if (edgeList.length > maxEdges) {
+    edgeList = edgeList.slice().sort((a, b) => (b.weight || 0) - (a.weight || 0)).slice(0, maxEdges);
+  }
+
+  // 节点很多时减弱物理，但始终保留轻微动效（类 Obsidian，不全固定）
+  const heavy = data.nodes.length >= 400;
+  const ambientPhysics = {
+    enabled: true,
+    solver: 'forceAtlas2Based',
+    forceAtlas2Based: {
+      gravitationalConstant: heavy ? -22 : -32,
+      centralGravity: heavy ? 0.006 : 0.01,
+      springLength: heavy ? 78 : 96,
+      springConstant: heavy ? 0.035 : 0.045,
+      damping: 0.42,
+      avoidOverlap: 0.25,
+    },
+    maxVelocity: heavy ? 18 : 28,
+    minVelocity: 0.35,
+    timestep: 0.35,
+    stabilization: {
+      enabled: true,
+      iterations: heavy ? 55 : 100,
+      updateInterval: 25,
+      fit: true,
+    },
+  };
+  // 聚焦时略加强斥力，但仍保持全局可动
+  const focusPhysics = {
+    enabled: true,
+    solver: 'forceAtlas2Based',
+    forceAtlas2Based: {
+      gravitationalConstant: heavy ? -38 : -58,
+      centralGravity: 0.006,
+      springLength: heavy ? 100 : 120,
+      springConstant: 0.035,
+      damping: 0.38,
+      avoidOverlap: 0.35,
+    },
+    maxVelocity: heavy ? 26 : 40,
+    minVelocity: 0.25,
+    timestep: 0.4,
+    stabilization: { enabled: false },
+  };
+
+  // 画布上节点 / 边 / 字必须分三层：
+  // 节点用色块，边用淡底线，字用墨色+纸色描边。禁止 inherit（canvas 读不到 CSS）。
+  const darkGraph = !!(window.matchMedia && window.matchMedia('(prefers-color-scheme: dark)').matches);
+  const GRAPH = {
+    ink: darkGraph ? '#efece1' : '#131810',
+    paper: darkGraph ? '#1b1d16' : '#f7f4ea',
+    accent: darkGraph ? '#d45a48' : '#b42318',
+    edge: darkGraph ? 'rgba(239,236,225,0.18)' : 'rgba(19,24,16,0.14)',
+    edgeDim: darkGraph ? 'rgba(239,236,225,0.06)' : 'rgba(19,24,16,0.06)',
+    dimFill: darkGraph ? 'rgba(239,236,225,0.10)' : 'rgba(19,24,16,0.07)',
+    dimLabel: darkGraph ? 'rgba(239,236,225,0.32)' : 'rgba(19,24,16,0.28)',
+    face: 'PingFang SC, Hiragino Sans GB, Noto Sans CJK SC, sans-serif',
+    groups: darkGraph ? {
+      Term: { bg: '#8d8876', border: '#c4bfae', hi: '#d4cfbf' },
+      Concept: { bg: '#d45a48', border: '#f0b0a4', hi: '#e07060' },
+      Person: { bg: '#6a8aaa', border: '#b0c6d8', hi: '#8aa8c4' },
+      Other: { bg: '#a07858', border: '#d2b496', hi: '#b89070' },
+    } : {
+      Term: { bg: '#c9c2ad', border: '#8a8676', hi: '#ddd6c2' },
+      Concept: { bg: '#b42318', border: '#8a1c14', hi: '#d45a48' },
+      Person: { bg: '#3d5a72', border: '#2a3f5c', hi: '#5a7a94' },
+      Other: { bg: '#8a6750', border: '#6a4a32', hi: '#a88870' },
+    },
+  };
+  const GRAPH_GROUP_COLORS = GRAPH.groups;
+  const labelFont = (size, extra) => Object.assign({
+    size: size,
+    face: GRAPH.face,
+    color: GRAPH.ink,
+    strokeWidth: 4,
+    strokeColor: GRAPH.paper,
+    bold: false,
+  }, extra || {});
+  const edgeColor = (hex, opacity) => ({
+    color: hex, highlight: GRAPH.accent, hover: GRAPH.accent, opacity: opacity == null ? 1 : opacity,
+  });
+
+  const nodes = new vis.DataSet(data.nodes.map(n => {
+    const group = n.group || n.type || 'Term';
+    const baseColor = GRAPH_GROUP_COLORS[group] || GRAPH_GROUP_COLORS.Term;
+    return {
+      id: String(n.id),
+      label: String(n.label || n.id),
+      value: Math.max(1, n.mentions || 1),
+      group: group,
+      title: (n.type || '') + ' · 提及 ' + (n.mentions || 0) + ' · 点击锁定聚焦',
+      borderWidth: 1,
+      color: {
+        background: baseColor.bg,
+        border: baseColor.border,
+        highlight: { background: baseColor.hi, border: baseColor.border },
+        hover: { background: baseColor.hi, border: baseColor.border },
+      },
+      font: labelFont(heavy ? 11 : 13),
+      opacity: 1,
+    };
+  }));
+  const edges = new vis.DataSet(edgeList.map(e => ({
+    id: String(e.id),
+    from: String(e.from),
+    to: String(e.to),
+    value: Math.max(1, e.weight || 1),
+    title: (e.label || '') + ' · w=' + (e.weight || 1),
+    width: 1,
+    color: edgeColor(GRAPH.edge, 1),
+    smooth: heavy ? false : { type: 'continuous', roundness: 0.4 },
+  })));
+
+  // 邻接表：悬停预览 / 点击锁定
+  const adj = {};
+  edgeList.forEach(e => {
+    const a = String(e.from);
+    const b = String(e.to);
+    if (!adj[a]) adj[a] = new Set();
+    if (!adj[b]) adj[b] = new Set();
+    adj[a].add(b);
+    adj[b].add(a);
+  });
+
+  let net;
+  try {
+    net = new vis.Network(canvas, { nodes: nodes, edges: edges }, {
+      autoResize: true,
+      height: '100%',
+      width: '100%',
+      physics: ambientPhysics,
+      interaction: {
+        hover: true,
+        tooltipDelay: 100,
+        navigationButtons: false,
+        keyboard: false,
+        zoomView: true,
+        dragNodes: true,
+        hideEdgesOnDrag: heavy,
+      },
+      nodes: {
+        shape: 'dot',
+        scaling: { min: heavy ? 6 : 10, max: heavy ? 26 : 32 },
+        font: labelFont(heavy ? 11 : 13),
+        borderWidth: 1,
+      },
+      edges: {
+        color: edgeColor(GRAPH.edge, 1),
+        smooth: heavy ? false : { type: 'continuous', roundness: 0.4 },
+        selectionWidth: 2,
+      },
+      groups: {
+        Term: { color: { background: GRAPH_GROUP_COLORS.Term.bg, border: GRAPH_GROUP_COLORS.Term.border } },
+        Concept: { color: { background: GRAPH_GROUP_COLORS.Concept.bg, border: GRAPH_GROUP_COLORS.Concept.border } },
+        Person: { color: { background: GRAPH_GROUP_COLORS.Person.bg, border: GRAPH_GROUP_COLORS.Person.border } },
+        Other: { color: { background: GRAPH_GROUP_COLORS.Other.bg, border: GRAPH_GROUP_COLORS.Other.border } },
+      },
+    });
+  } catch (e) {
+    canvas.innerHTML = '<div class="banner-warn">图谱渲染失败：' + esc(e.message || e) + '</div>';
+    return;
+  }
+  state.graphNet = net;
+
+  // focus: locked=点击锁定；preview=仅悬停预览（未锁定时）
+  // 关键规则：主节点 fixed，邻居可动，悬停预览只改样式不推开（防抽搐导致点不中）
+  const focusState = {
+    lockedId: null,
+    previewId: null,
+    anim: null,
+    fixedMainId: null,
+  };
+
+  const fitOnce = () => {
+    // 只适配画布内部视口，绝不改外层滚动位置
+    const main = $('#main');
+    const keepScroll = main ? main.scrollTop : 0;
+    try {
+      net.redraw();
+      net.fit({ animation: false });
+    } catch (e) { /* ignore */ }
+    if (main && main.scrollTop !== keepScroll) main.scrollTop = keepScroll;
+  };
+  net.once('stabilizationIterationsDone', () => {
+    fitOnce();
+    // 稳定后保留很轻的环境物理（不全冻死）
+    try {
+      net.setOptions({
+        physics: Object.assign({}, ambientPhysics, {
+          stabilization: { enabled: false },
+          maxVelocity: heavy ? 8 : 12,
+          minVelocity: 0.55,
+        }),
+      });
+    } catch (e) { /* ignore */ }
+  });
+  // 只做有限次 fit，避免反复布局把页面顶动
+  setTimeout(fitOnce, 280);
+  // 禁止 fit 动画；交互仅在 canvas 内
+  try {
+    net.setOptions({
+      interaction: {
+        hover: true,
+        tooltipDelay: 100,
+        navigationButtons: false,
+        keyboard: false,
+        zoomView: true,
+        dragView: true,
+        dragNodes: true,
+        hideEdgesOnDrag: heavy,
+      },
+    });
+  } catch (e) { /* ignore */ }
+
+  if (typeof ResizeObserver !== 'undefined') {
+    if (state._graphRo) {
+      try { state._graphRo.disconnect(); } catch (e) { /* ignore */ }
+    }
+    state._graphRo = new ResizeObserver(() => {
+      try { net.redraw(); } catch (e) { /* ignore */ }
+    });
+    state._graphRo.observe(canvas);
+  }
+
+  const hint = $('#graphMetaHint');
+  if (hint) {
+    const extra = ' · 显示 ' + data.nodes.length + ' 点 / ' + edgeList.length + ' 边' +
+      (data.truncated ? '（已截断，可提高上限）' : '') +
+      ' · 点击锁定聚焦，点空白取消';
+    if (hint.textContent.indexOf('显示') < 0) hint.textContent += extra;
+  }
+
+  function cancelFocusAnim() {
+    if (focusState.anim) {
+      cancelAnimationFrame(focusState.anim);
+      focusState.anim = null;
+    }
+  }
+
+  function unpinMain() {
+    if (!focusState.fixedMainId) return;
+    try {
+      nodes.update({ id: focusState.fixedMainId, fixed: { x: false, y: false } });
+    } catch (e) { /* ignore */ }
+    focusState.fixedMainId = null;
+  }
+
+  function pinMain(id) {
+    if (!id) return;
+    if (focusState.fixedMainId && focusState.fixedMainId !== id) unpinMain();
+    try {
+      // 钉在当前坐标，避免悬停/锁定时主节点被物理拽走
+      const pos = net.getPositions([id])[id];
+      if (pos) {
+        nodes.update({ id: id, x: pos.x, y: pos.y, fixed: { x: true, y: true } });
+      } else {
+        nodes.update({ id: id, fixed: { x: true, y: true } });
+      }
+      focusState.fixedMainId = id;
+    } catch (e) { /* ignore */ }
+  }
+
+  function resetVisualStyles(exceptFixedId) {
+    const nUpdates = nodes.getIds().map(id => {
+      const n = nodes.get(id);
+      const group = (n && n.group) || 'Term';
+      const c = GRAPH_GROUP_COLORS[group] || GRAPH_GROUP_COLORS.Term;
+      return {
+        id: id,
+        opacity: 1,
+        borderWidth: 1,
+        color: {
+          background: c.bg,
+          border: c.border,
+          highlight: { background: c.hi, border: c.border },
+          hover: { background: c.hi, border: c.border },
+        },
+        font: labelFont(heavy ? 11 : 13),
+        // 只保留当前主节点固定；其余解开
+        fixed: (exceptFixedId && id === exceptFixedId)
+          ? { x: true, y: true }
+          : { x: false, y: false },
+      };
+    });
+    nodes.update(nUpdates);
+    const eUpdates = edges.getIds().map(id => ({
+      id: id,
+      width: 1,
+      color: edgeColor(GRAPH.edge, 1),
+    }));
+    edges.update(eUpdates);
+  }
+
+  function setAmbientPhysics(mode) {
+    try {
+      if (mode === 'focus') {
+        // 锁定时略增强，但速度压低，减少抖动
+        net.setOptions({
+          physics: Object.assign({}, focusPhysics, {
+            maxVelocity: heavy ? 10 : 16,
+            minVelocity: 0.4,
+            stabilization: { enabled: false },
+          }),
+        });
+      } else {
+        net.setOptions({
+          physics: Object.assign({}, ambientPhysics, {
+            stabilization: { enabled: false },
+            maxVelocity: heavy ? 8 : 12,
+            minVelocity: 0.55,
+          }),
+        });
+      }
+    } catch (e) { /* ignore */ }
+  }
+
+  function paintFocusVisual(focusId, mode) {
+    const neighborSet = adj[focusId] ? new Set(adj[focusId]) : new Set();
+    neighborSet.add(focusId);
+    const nUpdates = nodes.getIds().map(id => {
+      const n = nodes.get(id);
+      const group = (n && n.group) || 'Term';
+      const c = GRAPH_GROUP_COLORS[group] || GRAPH_GROUP_COLORS.Term;
+      if (id === focusId) {
+        return {
+          id: id,
+          opacity: 1,
+          borderWidth: 3,
+          fixed: { x: true, y: true },
+          color: {
+            background: c.hi,
+            border: mode === 'lock' ? GRAPH.ink : c.border,
+            highlight: { background: c.hi, border: GRAPH.ink },
+            hover: { background: c.hi, border: GRAPH.ink },
+          },
+          font: labelFont(heavy ? 13 : 15, { bold: true, strokeWidth: 5 }),
+        };
+      }
+      if (neighborSet.has(id)) {
+        return {
+          id: id,
+          opacity: 1,
+          borderWidth: 2,
+          fixed: { x: false, y: false },
+          color: {
+            background: c.bg,
+            border: c.border,
+            highlight: { background: c.hi, border: c.border },
+            hover: { background: c.hi, border: c.border },
+          },
+          font: labelFont(heavy ? 12 : 13),
+        };
+      }
+      return {
+        id: id,
+        opacity: mode === 'lock' ? 0.22 : 0.36,
+        borderWidth: 1,
+        fixed: { x: false, y: false },
+        color: {
+          background: GRAPH.dimFill,
+          border: GRAPH.edge,
+          highlight: { background: GRAPH.dimFill, border: GRAPH.edge },
+          hover: { background: GRAPH.dimFill, border: GRAPH.edge },
+        },
+        font: labelFont(heavy ? 10 : 11, { color: GRAPH.dimLabel, strokeWidth: 3 }),
+      };
+    });
+    nodes.update(nUpdates);
+
+    const eUpdates = edges.getIds().map(id => {
+      const e = edges.get(id);
+      const connected = e && (e.from === focusId || e.to === focusId);
+      if (connected) {
+        return {
+          id: id,
+          width: Math.min(6, 2 + Math.log2(1 + (e.value || 1))),
+          color: { color: GRAPH.accent, highlight: GRAPH.accent, hover: GRAPH.accent, opacity: 1 },
+        };
+      }
+      return {
+        id: id,
+        width: 1,
+        color: edgeColor(GRAPH.edgeDim, mode === 'lock' ? 0.35 : 0.5),
+      };
+    });
+    edges.update(eUpdates);
+  }
+
+  function pushNeighborsOnce(focusId, mode) {
+    // 只在锁定时推开一次；主节点固定，邻居移动
+    let positions = {};
+    try { positions = net.getPositions(); } catch (e) { return; }
+    const fp = positions[focusId];
+    if (!fp) return;
+    const neighborSet = adj[focusId] ? Array.from(adj[focusId]) : [];
+    if (!neighborSet.length) return;
+
+    const basePush = heavy ? 36 : 58;
+    const pushExtra = Math.min(56, neighborSet.length);
+    const targetGain = 1.16;
+    const from = {};
+    const to = {};
+    neighborSet.forEach(id => {
+      const p = positions[id];
+      if (!p) return;
+      let dx = p.x - fp.x;
+      let dy = p.y - fp.y;
+      let dist = Math.sqrt(dx * dx + dy * dy);
+      if (dist < 1e-3) {
+        const ang = Math.random() * Math.PI * 2;
+        dx = Math.cos(ang);
+        dy = Math.sin(ang);
+        dist = 1;
+      }
+      const ux = dx / dist;
+      const uy = dy / dist;
+      const want = Math.max(dist * targetGain, dist + basePush + pushExtra * 0.1);
+      from[id] = { x: p.x, y: p.y };
+      to[id] = { x: fp.x + ux * want, y: fp.y + uy * want };
+    });
+
+    cancelFocusAnim();
+    const t0 = performance.now();
+    const dur = heavy ? 180 : 240;
+    const step = (now) => {
+      if (focusState.lockedId !== focusId) return;
+      const t = Math.min(1, (now - t0) / dur);
+      const k = 1 - Math.pow(1 - t, 3);
+      Object.keys(to).forEach(id => {
+        const a = from[id];
+        const b = to[id];
+        if (!a || !b) return;
+        try {
+          net.moveNode(id, a.x + (b.x - a.x) * k, a.y + (b.y - a.y) * k);
+        } catch (e) { /* ignore */ }
+      });
+      if (t < 1) focusState.anim = requestAnimationFrame(step);
+      else focusState.anim = null;
+    };
+    focusState.anim = requestAnimationFrame(step);
+  }
+
+  function clearFocus(opts) {
+    opts = opts || {};
+    cancelFocusAnim();
+    const had = focusState.lockedId || focusState.previewId;
+    focusState.lockedId = null;
+    focusState.previewId = null;
+    if (!had && !opts.force) return;
+    unpinMain();
+    resetVisualStyles(null);
+    setAmbientPhysics('ambient');
+  }
+
+  function applyFocus(focusId, mode) {
+    // mode: 'preview' | 'lock'
+    if (!focusId) return;
+    if (mode === 'preview' && focusState.lockedId) return;
+    if (mode === 'preview' && focusState.previewId === focusId) return;
+    if (mode === 'lock' && focusState.lockedId === focusId) return;
+
+    if (mode === 'lock') {
+      focusState.lockedId = focusId;
+      focusState.previewId = null;
+    } else {
+      focusState.previewId = focusId;
+    }
+
+    // 先钉住主节点，再改样式，避免抽搐导致 hover 丢失
+    pinMain(focusId);
+    paintFocusVisual(focusId, mode);
+
+    if (mode === 'lock') {
+      setAmbientPhysics('focus');
+      pushNeighborsOnce(focusId, mode);
+    } else {
+      // 预览：只高亮，不推开、不改全局物理力度，保证鼠标能稳得点中
+      setAmbientPhysics('ambient');
+    }
+  }
+
+  // 悬停预览：只样式，不推开（解决点不中）
+  net.on('hoverNode', params => {
+    if (!params || params.node == null) return;
+    if (focusState.lockedId) return;
+    applyFocus(String(params.node), 'preview');
+  });
+  net.on('blurNode', () => {
+    if (focusState.lockedId) return;
+    if (focusState.previewId) {
+      focusState.previewId = null;
+      cancelFocusAnim();
+      unpinMain();
+      resetVisualStyles(null);
+      setAmbientPhysics('ambient');
+    }
+  });
+
+  // 点击：锁定 / 解锁；空白取消
+  net.on('click', async params => {
+    const side = $('#graphSide');
+    if (params.nodes && params.nodes.length) {
+      const eid = String(params.nodes[0]);
+      if (focusState.lockedId === eid) {
+        clearFocus({ force: true });
+      } else {
+        applyFocus(eid, 'lock');
+      }
+      if (side) {
+        side.innerHTML = '<div class="card-hint">加载来源…</div>';
+        try {
+          const info = await api('/entities/' + eid + '/sources');
+          const name = info.entity ? info.entity.name : eid;
+          const srcs = info.sources || [];
+          const lockNote = focusState.lockedId === eid
+            ? '<div class="card-hint" style="margin-top:6px">已锁定 · 主节点固定 · 再点该节点或空白取消</div>'
+            : '';
+          side.innerHTML = '<div class="graph-side-head"><strong>' + esc(name) + '</strong>' +
+            (info.entity ? ' <span class="badge">' + esc(info.entity.type) + '</span>' : '') +
+            '</div>' + lockNote +
+            (srcs.length ? srcs.map(r =>
+              '<div class="result-card" style="margin:8px 0"><div class="result-head">' +
+              '<span class="result-doc">《' + esc(r.doc_name) + '》</span>' +
+              (r.location ? '<span class="result-loc">' + esc(r.location) + '</span>' : '') +
+              '</div><div class="result-text">' + esc(r.text) + '</div></div>'
+            ).join('') : '<div class="empty-state">无来源片段</div>');
+        } catch (e) {
+          side.innerHTML = '<div class="banner-warn">' + esc(e.message) + '</div>';
+        }
+      }
+      return;
+    }
+    if (focusState.lockedId || focusState.previewId) {
+      clearFocus({ force: true });
+      if (side) {
+        side.innerHTML = '<div class="empty-state" style="padding:8px 0">' +
+          '点一个节点看原文；再点一次或点空白取消锁定。</div>';
+      }
+    }
+  });
+}
+
 /* ---------- 科目设置 ---------- */
 
 function renderConfigTab(s) {
@@ -1245,32 +2160,32 @@ function renderConfigTab(s) {
     '<div class="form-row"><label>科目名称</label><input class="input" id="cfgName" value="' + esc(s.name) + '"></div>' +
     '<div class="form-row"><label>简介（可选）</label><input class="input" id="cfgDesc" placeholder="如：高中语文 · 必修上册" value="' + esc(s.description) + '"></div>' +
     '</div>' +
-    '<div class="form-row"><label>图标</label><div class="emoji-grid" id="cfgEmoji">' +
+    '<div class="form-row"><label>标记</label><div class="emoji-grid" id="cfgEmoji">' +
     EMOJIS.map(e => '<button class="emoji-opt' + (e === s.icon ? ' sel' : '') + '" data-emoji="' + e + '">' + e + '</button>').join('') +
-    '</div></div>' +
+    '</div><div class="hint">短标签用于侧栏与标题，也可用科目名首字</div></div>' +
     '<div class="form-row"><label>颜色</label><div class="color-row" id="cfgColor">' +
     COLORS.map(c => '<button class="color-opt' + (c === s.color ? ' sel' : '') + '" data-color="' + c + '" style="background:' + c + '"></button>').join('') +
     '</div></div></div>' +
 
-    '<div class="card"><h3>模型配置</h3>' +
-    '<div class="card-hint">默认跟随全局设置；如需为本科目单独指定模型，在这里选择</div>' +
+    '<div class="card"><h3>模型</h3>' +
+    '<div class="card-hint">默认跟随全局设置；可为本科目单独指定</div>' +
     (state.providers.length === 0
-      ? '<div class="banner-warn">还没有添加任何 API 服务商，请先到「全局设置」添加</div>' : '') +
-    '<div class="form-row"><label>向量化模型（Embedding）</label>' +
+      ? '<div class="banner-warn">还没有服务商，请先到设置添加</div>' : '') +
+    '<div class="form-row"><label>向量模型</label>' +
     modelPickerHtml('subjEmbed', s.embed_provider_id, s.embed_model, true, true) +
-    '<div class="hint">⚠️ 更换向量化模型后需要「重建索引」，否则新旧向量不一致会影响检索</div></div>' +
+    '<div class="hint">更换向量模型后需重建索引</div></div>' +
     '<div class="form-row"><label>对话模型</label>' +
     modelPickerHtml('subjChat', s.chat_provider_id, s.chat_model, true) + '</div>' +
-    '<div class="form-row"><label>检索片段数（top_k）</label>' +
+    '<div class="form-row"><label>检索片段数 top_k</label>' +
     '<input class="input" id="cfgTopK" type="number" min="1" max="20" value="' + (s.top_k || 5) + '" style="max-width:120px">' +
-    '<div class="hint">每次回答时检索的资料片段数量，越大上下文越多</div></div>' +
-    '<div class="form-row"><label>自定义系统提示词（可选）</label>' +
-    '<textarea class="input" id="cfgPrompt" placeholder="留空使用默认提示词。可以写：你是我的语文老师，讲解时先给结论再举例…">' + esc(s.system_prompt) + '</textarea></div>' +
-    '<button class="btn btn-primary" id="cfgSaveBtn">保存设置</button></div>' +
+    '<div class="hint">每次回答引用的资料片段数量</div></div>' +
+    '<div class="form-row"><label>系统提示词（可选）</label>' +
+    '<textarea class="input" id="cfgPrompt" placeholder="留空使用默认提示词">' + esc(s.system_prompt) + '</textarea></div>' +
+    '<button class="btn btn-primary" id="cfgSaveBtn">保存</button></div>' +
 
-    '<div class="card"><h3 style="color:var(--danger)">危险操作</h3>' +
+    '<div class="card"><h3 style="color:var(--danger)">危险区域</h3>' +
     '<div class="form-inline" style="justify-content:space-between">' +
-    '<span style="color:var(--muted);font-size:13px">删除科目将同时删除其全部资料、索引和对话记录，不可恢复</span>' +
+    '<span style="color:var(--muted);font-size:13px">删除科目及其资料、索引与对话，不可恢复</span>' +
     '<button class="btn btn-danger" id="cfgDeleteBtn">删除科目</button></div></div>';
 
   let selEmoji = s.icon, selColor = s.color;
@@ -1352,9 +2267,9 @@ function newSubjectModal() {
     '<h2>新建科目</h2>' +
     '<div class="form-row"><label>科目名称</label>' +
     '<input class="input" id="nsName" placeholder="如：语文、高等数学、数据结构"></div>' +
-    '<div class="form-row"><label>图标</label><div class="emoji-grid" id="nsEmoji">' +
+    '<div class="form-row"><label>标记</label><div class="emoji-grid" id="nsEmoji">' +
     EMOJIS.map((e, i) => '<button class="emoji-opt' + (i === 0 ? ' sel' : '') + '" data-emoji="' + e + '">' + e + '</button>').join('') +
-    '</div></div>' +
+    '</div><div class="hint">用于侧栏显示的短标签</div></div>' +
     '<div class="form-row"><label>颜色</label><div class="color-row" id="nsColor">' +
     COLORS.map((c, i) => '<button class="color-opt' + (i === 0 ? ' sel' : '') + '" data-color="' + c + '" style="background:' + c + '"></button>').join('') +
     '</div></div>' +
@@ -1397,17 +2312,30 @@ function newSubjectModal() {
 /* ================= 启动 ================= */
 
 async function init() {
+  setBootText('启动');
   $('#addSubjectBtn').onclick = newSubjectModal;
   $('#homeBtn').onclick = () => nav({ type: 'home' });
   $('#settingsBtn').onclick = () => nav({ type: 'settings' });
+  const bootStarted = Date.now();
   try {
     await loadCore();
+    setBootText('就绪');
   } catch (e) {
-    $('#main').innerHTML = '<div class="page"><div class="banner-warn">无法连接后端服务：' +
+    setBootText('启动失败');
+    hideBootSplash();
+    $('#main').innerHTML = '<div class="page"><div class="banner-warn">无法连接后端：' +
       esc(e.message) + '</div></div>';
     return;
   }
   nav({ type: 'home' });
+  const remain = Math.max(0, 700 - (Date.now() - bootStarted));
+  setTimeout(() => {
+    requestAnimationFrame(() => {
+      requestAnimationFrame(() => hideBootSplash());
+    });
+  }, remain);
+  const idle = window.requestIdleCallback || function (cb) { setTimeout(cb, 1200); };
+  idle(() => { ensureVisNetwork().catch(() => {}); });
 }
 
 init();

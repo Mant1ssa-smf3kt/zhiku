@@ -12,6 +12,18 @@ from fastapi.staticfiles import StaticFiles
 from pydantic import BaseModel
 
 from . import database as db
+from .graph_pipe import (
+    build_graph_view,
+    document_graph_progress,
+    documents_for_topic,
+    enqueue_document,
+    entity_sources,
+    get_graph_status,
+    list_topics,
+    purge_document_graph,
+    purge_subject_graph,
+    rename_topic,
+)
 from .ingest import process_document_async, reindex_subject_async
 from .llm import LLMError, chat_once, chat_stream, embed_texts, list_models
 from .parsers import SUPPORTED_EXTS
@@ -56,6 +68,8 @@ class SettingsIn(BaseModel):
     default_embed_model: Optional[str] = None
     default_chat_provider_id: Optional[str] = None
     default_chat_model: Optional[str] = None
+    graph_enabled: Optional[str] = None
+    graph_llm_extract: Optional[str] = None
 
 
 class SubjectIn(BaseModel):
@@ -74,6 +88,8 @@ class SubjectIn(BaseModel):
 class SearchIn(BaseModel):
     query: str
     top_k: Optional[int] = None
+    use_graph: Optional[bool] = True
+    topic_id: Optional[str] = None
 
 
 class ConvIn(BaseModel):
@@ -83,6 +99,7 @@ class ConvIn(BaseModel):
 class ChatIn(BaseModel):
     message: str
     use_rag: bool = True
+    use_graph: bool = True
 
 
 # ---------- 工具函数 ----------
@@ -299,12 +316,19 @@ def providers_test(pid: str, body: TestIn):
 SETTING_KEYS = [
     "default_embed_provider_id", "default_embed_model",
     "default_chat_provider_id", "default_chat_model",
+    "graph_enabled", "graph_llm_extract",
 ]
 
 
 @app.get("/api/settings")
 def settings_get():
-    return {k: db.get_setting(k) or "" for k in SETTING_KEYS}
+    out = {k: db.get_setting(k) or "" for k in SETTING_KEYS}
+    # 懒人默认：图谱开、LLM 抽图关
+    if not out.get("graph_enabled"):
+        out["graph_enabled"] = "1"
+    if not out.get("graph_llm_extract"):
+        out["graph_llm_extract"] = "0"
+    return out
 
 
 @app.put("/api/settings")
@@ -393,6 +417,7 @@ def subjects_delete(sid: str):
                 os.remove(d["file_path"])
         except OSError:
             pass
+    purge_subject_graph(sid)
     db.execute("DELETE FROM chunks WHERE subject_id=?", (sid,))
     db.execute("DELETE FROM documents WHERE subject_id=?", (sid,))
     db.execute(
@@ -411,6 +436,8 @@ def _doc_public(d):
     out = {k: d[k] for k in ("id", "subject_id", "filename", "filetype", "size", "status",
                              "error", "chunk_count", "total_chunks", "processed_chunks",
                              "created_at")}
+    out["graph_status"] = d.get("graph_status") or "none"
+    out["graph_error"] = d.get("graph_error") or ""
     return out
 
 
@@ -480,6 +507,7 @@ def documents_delete(doc_id: str):
     d = db.query_one("SELECT * FROM documents WHERE id=?", (doc_id,))
     if not d:
         raise HTTPException(404, "文档不存在")
+    purge_document_graph(doc_id)
     db.execute("DELETE FROM chunks WHERE document_id=?", (doc_id,))
     db.execute("DELETE FROM documents WHERE id=?", (doc_id,))
     try:
@@ -488,6 +516,106 @@ def documents_delete(doc_id: str):
     except OSError:
         pass
     return {"ok": True}
+
+
+@app.get("/api/subjects/{sid}/graph")
+def subjects_graph_status(sid: str):
+    _get_subject_or_404(sid)
+    return get_graph_status(sid)
+
+
+@app.get("/api/documents/{doc_id}/graph/progress")
+def documents_graph_progress(doc_id: str):
+    d = db.query_one("SELECT id FROM documents WHERE id=?", (doc_id,))
+    if not d:
+        raise HTTPException(404, "文档不存在")
+    prog = document_graph_progress(doc_id)
+    if not prog:
+        raise HTTPException(404, "文档不存在")
+    return prog
+
+
+@app.post("/api/subjects/{sid}/graph/rebuild")
+def subjects_graph_rebuild(sid: str):
+    _get_subject_or_404(sid)
+    docs = db.query(
+        "SELECT id FROM documents WHERE subject_id=? AND status='ready'", (sid,)
+    )
+    if not docs:
+        raise HTTPException(400, "该科目还没有已入库的资料")
+    started = 0
+    for d in docs:
+        if enqueue_document(d["id"], force=True):
+            started += 1
+    return {"started": started}
+
+
+@app.post("/api/documents/{doc_id}/graph/retry")
+def documents_graph_retry(doc_id: str):
+    d = db.query_one("SELECT * FROM documents WHERE id=?", (doc_id,))
+    if not d:
+        raise HTTPException(404, "文档不存在")
+    if d["status"] != "ready":
+        raise HTTPException(400, "文档尚未入库完成，请先完成向量化")
+    if d.get("graph_status") in ("pending", "building"):
+        raise HTTPException(400, "知识图谱正在构建中")
+    job_id = enqueue_document(doc_id, force=True)
+    if not job_id:
+        raise HTTPException(400, "无法入队建图任务")
+    return {"ok": True, "job_id": job_id}
+
+
+@app.get("/api/subjects/{sid}/graph/view")
+def subjects_graph_view(
+    sid: str,
+    seed: Optional[str] = None,
+    depth: int = 1,
+    limit: int = 200,
+):
+    _get_subject_or_404(sid)
+    return build_graph_view(sid, seed_entity_id=seed, depth=depth, limit=limit)
+
+
+@app.get("/api/entities/{eid}/sources")
+def entities_sources(eid: str):
+    ent = db.query_one("SELECT * FROM entities WHERE id=?", (eid,))
+    if not ent:
+        raise HTTPException(404, "实体不存在")
+    return {"entity": {"id": ent["id"], "name": ent["name"], "type": ent["type"]},
+            "sources": entity_sources(eid)}
+
+
+@app.get("/api/subjects/{sid}/topics")
+def subjects_topics(sid: str):
+    _get_subject_or_404(sid)
+    return list_topics(sid)
+
+
+@app.get("/api/subjects/{sid}/topics/{tid}/documents")
+def subjects_topic_documents(sid: str, tid: str):
+    _get_subject_or_404(sid)
+    rows = documents_for_topic(sid, tid)
+    if rows is None:
+        raise HTTPException(404, "主题不存在")
+    return [_doc_public(d) for d in rows]
+
+
+class TopicIn(BaseModel):
+    name: Optional[str] = None
+    locked: Optional[bool] = None
+
+
+@app.patch("/api/topics/{tid}")
+def topics_patch(tid: str, body: TopicIn):
+    row = rename_topic(tid, body.name, body.locked)
+    if not row:
+        raise HTTPException(404, "主题不存在")
+    return {
+        "id": row["id"],
+        "name": row["name"],
+        "locked": bool(row["locked"]),
+        "subject_id": row["subject_id"],
+    }
 
 
 @app.post("/api/documents/{doc_id}/retry")
@@ -536,7 +664,9 @@ def subjects_search(sid: str, body: SearchIn):
     if not q:
         raise HTTPException(400, "请输入检索内容")
     try:
-        results, warning = search_subject(subject, q, body.top_k)
+        results, warning = search_subject(
+            subject, q, body.top_k, use_graph=bool(body.use_graph), topic_id=body.topic_id
+        )
     except ValueError as e:
         raise HTTPException(400, str(e))
     except LLMError as e:
@@ -702,7 +832,9 @@ def chat(cid: str, body: ChatIn):
                 )
                 if has_chunks:
                     try:
-                        sources, warning = search_subject(subject, question)
+                        sources, warning = search_subject(
+                            subject, question, use_graph=bool(body.use_graph)
+                        )
                         yield _sse({
                             "type": "sources",
                             "warning": warning,
@@ -710,7 +842,8 @@ def chat(cid: str, body: ChatIn):
                                 {"index": i + 1, "doc_name": s["doc_name"],
                                  "location": s["location"], "score": s["score"],
                                  "document_id": s["document_id"],
-                                 "text": s["text"][:600]}
+                                 "text": s["text"][:600],
+                                 "graph_boost": s.get("graph_boost", 0)}
                                 for i, s in enumerate(sources)
                             ],
                         })

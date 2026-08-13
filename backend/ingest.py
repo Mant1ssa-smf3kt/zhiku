@@ -80,6 +80,13 @@ def _process(doc_id):
                 "UPDATE documents SET status='ready', chunk_count=?, error='' WHERE id=?",
                 (seq, doc_id),
             )
+            # 入库成功后异步建图（规则实体 + 共现）；失败不回滚 ready
+            try:
+                from .graph_pipe import enqueue_document
+
+                enqueue_document(doc_id)
+            except Exception:
+                pass
         except Exception as e:
             _fail(doc_id, e)
 

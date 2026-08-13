@@ -15,10 +15,20 @@ mkdir -p "$LOG_DIR"
 printf '=== %s launch arch=%s ===\n' "$(date)" "$(uname -m)" >> "$LOG"
 
 export PATH="/opt/homebrew/bin:/usr/local/bin:/usr/bin:/bin:/usr/sbin:/sbin"
-ARCH_PREFIX=()
+
+# 在 Apple Silicon 上若被 Rosetta 以 x86_64 拉起，强制切回 arm64（venv 扩展为 arm64）
+# 注意：set -u 下空数组 "${arr[@]}" 会报 unbound variable，故用字符串拼前缀，不用空数组。
+ARCH_CMD=()
 if [ "$(sysctl -n hw.optional.arm64 2>/dev/null || true)" = "1" ] && [ "$(uname -m)" != "arm64" ]; then
-  ARCH_PREFIX=(/usr/bin/arch -arm64)
+  ARCH_CMD=(/usr/bin/arch -arm64)
 fi
+run() {
+  if [ "${#ARCH_CMD[@]}" -gt 0 ]; then
+    "${ARCH_CMD[@]}" "$@"
+  else
+    "$@"
+  fi
+}
 
 if [ ! -x .venv/bin/python ]; then
   PYTHON_BIN="$(command -v python3 || true)"
@@ -27,11 +37,16 @@ if [ ! -x .venv/bin/python ]; then
     exit 1
   fi
   /usr/bin/osascript -e 'display notification "首次启动，正在安装依赖，可能需要几分钟…" with title "知库"' || true
-  if ! "${ARCH_PREFIX[@]}" "$PYTHON_BIN" -m venv .venv >> "$LOG" 2>&1 || \
-     ! "${ARCH_PREFIX[@]}" .venv/bin/python -m pip install --disable-pip-version-check -q -r requirements.txt >> "$LOG" 2>&1; then
+  if ! run "$PYTHON_BIN" -m venv .venv >> "$LOG" 2>&1 || \
+     ! run .venv/bin/python -m pip install --disable-pip-version-check -q -r requirements.txt >> "$LOG" 2>&1; then
     /usr/bin/osascript -e 'display alert "知库启动失败" message "依赖安装失败，请在终端进入项目目录运行 ./run.sh 查看详情"' || true
     exit 1
   fi
 fi
 
-exec "${ARCH_PREFIX[@]}" .venv/bin/python -m backend.desktop >> "$LOG" 2>&1
+# 用 run 启动；成功则不返回
+if [ "${#ARCH_CMD[@]}" -gt 0 ]; then
+  exec "${ARCH_CMD[@]}" .venv/bin/python -m backend.desktop >> "$LOG" 2>&1
+else
+  exec .venv/bin/python -m backend.desktop >> "$LOG" 2>&1
+fi
