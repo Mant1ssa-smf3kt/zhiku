@@ -101,7 +101,7 @@ def main():
 
     _rename_app_menu()
     webview.create_window(
-        "知库 · 个人学习知识库",
+        "知库",
         url,
         width=1280,
         height=840,

@@ -55,6 +55,17 @@ class ApiTests(unittest.TestCase):
         self.assertTrue(body["has_key"])
         self.assertNotEqual(body["api_key_masked"], "test-only-placeholder")
 
+    def test_empty_desk_seeds_hello_agent_sample(self):
+        subjects = self.client.get("/api/subjects")
+        self.assertEqual(subjects.status_code, 200)
+        names = [item["name"] for item in subjects.json()]
+        self.assertIn("Hello_agent", names)
+        sid = next(item["id"] for item in subjects.json() if item["name"] == "Hello_agent")
+        docs = self.client.get("/api/subjects/" + sid + "/documents")
+        self.assertEqual(docs.status_code, 200)
+        filenames = [item["filename"] for item in docs.json()]
+        self.assertIn("Hello-Agents.md", filenames)
+
     def test_subject_can_be_created_and_listed(self):
         created = self.client.post(
             "/api/subjects",

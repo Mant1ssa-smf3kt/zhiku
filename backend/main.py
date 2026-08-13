@@ -4,6 +4,7 @@ import mimetypes
 import os
 import re
 import time
+from contextlib import asynccontextmanager
 from typing import List, Optional
 
 from fastapi import FastAPI, File, HTTPException, UploadFile
@@ -39,7 +40,17 @@ DEFAULT_SYSTEM = (
     "3. 用清晰的中文讲解，适当使用列表、例子帮助理解。"
 )
 
-app = FastAPI(title="知库 · 个人 RAG 学习知识库")
+
+@asynccontextmanager
+async def _lifespan(_app: FastAPI):
+    db.get_conn()
+    from .seed import maybe_seed_hello_agent
+
+    maybe_seed_hello_agent()
+    yield
+
+
+app = FastAPI(title="知库 · 个人 RAG 学习知识库", lifespan=_lifespan)
 
 
 # ---------- Pydantic 模型 ----------

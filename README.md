@@ -56,10 +56,11 @@ py -3.9 -m venv .venv
 
 ## 使用方法
 
-1. 在“全局设置”中添加 OpenAI 兼容服务，填写 Base URL 和 API Key。
+1. 在“设置”中添加 OpenAI 兼容服务，填写 Base URL 和 API Key。
 2. 选择默认向量模型和对话模型；也可启用内置本地向量模型。
-3. 新建科目并上传资料，等待状态变为“已完成”。
-4. 在“学习问答”中提问，并核对回答下方的来源引用。
+3. 空书桌第一次启动会自动放入科目 **Hello_agent**（`samples/hello-agent/` 里的教程摘录）。配置好向量模型后，在资料页点失败项的「重试」即可入库。
+4. 也可自己新建科目并上传 PDF / PPTX / DOCX / 笔记，等待状态变为就绪。
+5. 在问答里提问，并核对本条回答下的出处。
 
 ## 数据与隐私
 
@@ -101,7 +102,8 @@ node --check frontend/app.js
 backend/       FastAPI API、SQLite 存储、文档解析、向量检索与模型客户端
 frontend/      零依赖单页前端
 assets/        应用图标
-知库.app/      macOS 桌面启动器（需保留在项目根目录）
+samples/       空书桌示例科目（Hello_agent）
+知库.app/      macOS 桌面启动器（壳脚本，读同级源码，无需编译）
 tests/         核心逻辑与 API 自动化测试
 run.sh         macOS / Linux 一键启动脚本
 data/          本地私有运行数据（自动创建，已被 Git 忽略）

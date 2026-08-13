@@ -1,7 +1,8 @@
 #!/bin/bash
 set -Eeuo pipefail
 
-# 此启动器依赖同级项目源码，因此知库.app 必须保留在项目根目录。
+# 启动器，不是编译产物。窗口打开的是同级 frontend/ + backend/，改源码即生效。
+# 因此知库.app 必须保留在项目根目录。
 PROJ="$(CDPATH= cd -- "$(dirname -- "$0")/../../.." && pwd)"
 if [ ! -f "$PROJ/backend/desktop.py" ] || [ ! -f "$PROJ/requirements.txt" ]; then
   /usr/bin/osascript -e 'display alert "知库启动失败" message "请将知库.app 放回包含 backend 和 requirements.txt 的项目根目录后重试"' || true
